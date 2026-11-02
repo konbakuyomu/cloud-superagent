@@ -223,6 +223,11 @@ P1 里另外三条是规矩和文档，没有程序判法：
   - Q15、Q20、Q25 的时限都是 2 秒，Windows 上起 pwsh 慢；
   - T10–T13 的 `git worktree` 路径要经 `canonical()` 比较。
 
+### 7.4a 推送以后的 CI
+
+- 用户本人在这个会话里说了「推送 phase2」，才推到 `origin/phase2`。CI 原来只在 main 和 PR 上跑；开 PR 没有得到同意，所以把触发条件改成推到任何分支都跑（`.github/workflows/ci.yml`）。
+- run 41490252810：ubuntu-latest 和 windows-latest 都是 success，两边的日志里都是 63 个 ✓、0 个 ✗、「全部通过」。7.4 担心的 Windows 时限、worktree 路径都没出问题。
+
 ### 7.5 交接要点
 
 - 代码：
