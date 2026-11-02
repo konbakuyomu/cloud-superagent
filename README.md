@@ -58,4 +58,4 @@ node bin/csa.mjs patrol                      # OK …
 
 ## 许可
 
-还没定，暂时没有 LICENSE 文件。在加上之前，默认保留所有权利。
+[MIT](LICENSE)。DeepSeek 原型本身也是 MIT（原型 `README.md:39`）；这里没有复制它的代码。

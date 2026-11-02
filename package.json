@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "非官方：把 DeepSeek Super-agent 的分发设计适配到 Claude Code 云端会话。总调度、子会话、看门狗三类会话，加执行机上的 queue / ticket / gate / patrol 四个确定性命令。",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "csa": "bin/csa.mjs",
