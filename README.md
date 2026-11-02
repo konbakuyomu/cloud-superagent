@@ -13,8 +13,8 @@ DeepSeek 公开过一个 Super-agent 研究原型：一个总控（Router）只�
   - **子会话**：一张票一个。开工前核授权、核票；重活只经排队；交回前先过 gate；交回时写「下一步草案」。
   - **看门狗**：每 10 分钟跑一次巡检，有事推一下负责的会话；只在三种情况直接找用户。
 - **执行机上的四个命令**（经 MCP 守护进程调用，例如 winhand；执行机上不需要登录 Claude）
-  - `csa queue`：重作业一次只跑一个，跑完自动开下一个；超上限停整棵进程树；时间窗到点自己停。
-  - `csa ticket`：一条线的台账；派单时记下判法哈希，开工以后改判法能被查出来。
+  - `csa queue`：重作业一次只跑一个，跑完自动开下一个；超上限停整棵进程树；时间窗到点自己停；可以急停；开跑前可以先跑检查；作业结束写事件、可以触发钩子。
+  - `csa ticket`：一条线的台账；派单时记下判法哈希，开工以后改判法能被查出来；`show` 给一张带下一跳的卡片；`dispatch --prepare` 建好这张票的 worktree。
   - `csa gate`：交回前照票里写定的检查逐条跑，再查改动范围和禁区。
   - `csa patrol`：巡检第一层，纯代码；没事只打一行 `OK`。
 
@@ -26,7 +26,7 @@ DeepSeek 公开过一个 Super-agent 研究原型：一个总控（Router）只�
 
 ```sh
 npm ci
-npm test                      # 39 个场景，约 1 分钟
+npm test                      # 63 个场景，约 1.5 分钟
 
 export CSA_DATA_DIR=$PWD/.csa-data
 node bin/csa.mjs queue add --owner TEST --est 5s -- "echo hello"
@@ -46,8 +46,9 @@ node bin/csa.mjs patrol                      # OK …
 2. [云端原语](docs/cloud-primitives.md)：`create_session`、`send_message` 的 `now` / `next` / `later`、`send_later`、`create_trigger`、`subscribe_pr_activity`、`get_session` 的上下文用量。
 3. [执行机接口和安全模型](docs/executor.md)：守护进程要提供什么，哪些能查出来、哪些拦不住。
 4. [命令约定](docs/cli.md)：四个命令的参数、数据目录、状态和异常码。
-5. 角色提示词（v2）：[总调度](docs/roles/router.md)、[子会话](docs/roles/worker.md)、[看门狗](docs/roles/watchdog.md)；[票模板](templates/ticket.md)。
-6. [run log](docs/run-log.md)：这个仓库怎么来的、验证记录、第二期的草案。
+5. [runbook](docs/runbook.md)：急停、恢复、时间窗和常见异常怎么处理。
+6. 角色提示词（v2.1）：[总调度](docs/roles/router.md)、[子会话](docs/roles/worker.md)、[看门狗](docs/roles/watchdog.md)；[票模板](templates/ticket.md)。
+7. [run log](docs/run-log.md)：这个仓库怎么来的、验证记录、第二期的草案。
 
 审代码的人和 Codex 先读 [AGENTS.md](AGENTS.md)。
 

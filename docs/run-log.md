@@ -36,6 +36,7 @@ CSA_PRIVATE_TERMS=<仓库以外的词表文件> scripts/check-private.sh
 ```
 
 - 脚本里是通用的模式：个人路径（盘符路径、Windows 和 Linux/macOS 的用户目录）、会话 / 定时任务 / 环境 id、邮箱、常见令牌格式、私钥头。没有匹配打印「干净」、退出码 0。
+- 第二期起也查**全部提交信息**（`git log --all`），模式相同。例外只有提交尾注里整行的 `Co-Authored-By: Claude …`（署名，带 Anthropic 的 noreply 地址） 和 `Claude-Session: https://claude.ai/code/session_…`：总调度定的，会话链接只有会话的主人登录后才打得开（AGENTS.md「唯一的例外」）。
 - 只有作者自己知道的词（用户名、私人域名、具体硬件项目的代号和板名）不能写进公开仓库，哪怕是写在搜索命令里：一行一个放进仓库以外的词表文件，用 `CSA_PRIVATE_TERMS` 传进去，按字面、不分大小写查。
 - 第一期的一个教训：第一版 run log 把这些私人词直接写在了 `git grep` 命令里，搜索命令自己就成了泄露。还没提交就发现了，改成上面的做法。
 - 测试夹具里原来用一个硬件工程目录名当「禁区」的例子，改成了中性的 `generated/**`（G3 的判法不变：碰了禁区就不过）。
@@ -148,14 +149,84 @@ CSA_PRIVATE_TERMS=<仓库以外的词表文件> scripts/check-private.sh
 
 有一条不过，就照实记下来，维持现状（选项 C）。
 
-## 7. 第二期进度（2026-11-02，暂停时写）
+## 7. 第二期
 
-总调度定的：6.1 A、6.2 A + C、6.3 A、6.4 A，判法照第 6 节草稿；6.5 只在实测后做。次序 6.2 → 6.1 → 6.3 → 6.4。推送、建仓库、发评论都要用户本人点头。
+### 7.1 总调度定的
 
-- 分支 `phase2`，只在本地提交，没推。
-- **6.2 已完成**：`csa queue config --on-end "<命令>" [--on-end-timeout 30s] | --clear-on-end`；每个终态往 `<数据目录>/events.jsonl` 写一行，写过的标 `evented_at`；钩子和排队并行跑，到时限停掉，失败只记日志。判法 Q14、Q15、Q16、Q17 都过。
-- **6.3 已完成**：`csa queue add --if "<检查>" [--if-timeout 60s]`；检查在排队程序里异步跑，不占锁；不过或超时就记 `skipped`；依赖它的作业取消；patrol 不报 `skipped`。判法 Q18、Q19、Q20 都过。
-- 容器里 `npm test`：46 项全过（39 + Q14–Q20 共 7 项）；typecheck 过。
-- **还没做**：6.1 `csa ticket show`（T7–T9），6.4 `--prepare`（T10–T13）；文档 `docs/cli.md` 还没写新参数。
-- 接着做的人：先读第 6 节的判法，再看 `src/queue.ts` 的 `runLoop`（Slot / Hook 两个结构）。
-- 暂停原因：用户的电脑要离线，总调度叫全部子任务暂停。暂停期间不经 winhand 碰电脑。
+- 第 6 节的草案全取推荐项，判法照草稿不改：6.1 A、6.2 A + C、6.3 A、6.4 A；6.5 A 要先实测。做的顺序是 6.2 → 6.1 → 6.3 → 6.4。
+- 另加框架审查的 P1 五条：
+  1. 发布类动作的规矩，票头加 `publish`；
+  2. 共用工作区只提交写明的路径；
+  3. 时间窗的钟点；
+  4. 急停和恢复，另写 runbook；
+  5. 看门狗更省。
+- 文档改正五处。AGENTS.md 写明会话链接是例外。`check-private.sh` 也要扫提交信息。
+- 只在容器的分支 `phase2` 上本地提交，不推送。推到公开仓库、新建仓库（包括信箱仓库）、往 GitHub 发评论，都要等用户本人在执行动作的会话里点头。
+- 中途暂停过一次（用户的电脑要离线，总调度叫全部子任务停手）。当时 6.2、6.3 已经做完，状态写进了 run log。恢复后接着做。
+
+### 7.2 每项的判法结果
+
+容器里（Linux，Node 22）的结果：`npm run typecheck` 通过，`npm test` **63/63** 通过。其中第一期 39 项，第二期新加 24 项。
+
+| 项 | 判法 | 结果 |
+|---|---|---|
+| 6.2 结束钩子 | Q14 每个作业钩子跑一次，CSA_JOB_ID / STATE / RC 和 queue.json 一致 | 过 |
+| | Q15 钩子退出码非零、或睡 60 秒被时限停掉，下一个作业不晚于前一个结束后 2 跳开 | 过（钩子的时限在测试里设 2 秒） |
+| | Q16 钩子的环境里没有作业输出 | 过 |
+| | Q17 events.jsonl 每个终态一行，排队程序重启后不重写 | 过 |
+| 6.1 ticket show | T7 `--json` 有 status、jobs[0].id、gate.verdict 和 gate.file、heads.<仓库>.dispatched 和 .now、next | 过 |
+| | T8 文本每项一行，下一跳在最后一行 | 过 |
+| | T9 show 前后数据目录、线的目录和线所在仓库里所有文件的 mtime 不变 | 过 |
+| 6.3 `--if` | Q18 检查返回 1 记 skipped，后面的照开 | 过 |
+| | Q19 `--after` 一个 skipped 的作业记 cancelled，原因写明被跳过 | 过 |
+| | Q20 检查超时记 skipped、原因写超时；patrol 不把 skipped 当 finished-unacked | 过（时限在测试里设 2 秒） |
+| 6.4 `--prepare` | T10 path 是 worktree，分支对，分叉点是 base_branch 的 HEAD | 过 |
+| | T11 再派一次不报错、不新建分支 | 过 |
+| | T12 path 已存在但不是 worktree：退出码 1，台账没这张票，分支列表不变 | 过 |
+| | T13 在 worktree 里改范围外的文件，gate 报 out-of-scope | 过 |
+| P1-1 publish | T14 publish 里有不认识的动作不让派 | 过 |
+| | T15 publish 算进判法，派单后放宽报 contract-changed | 过 |
+| | T16 没写 publish 的票，gate 写明不许做任何发布类动作 | 过 |
+| P1-3 钟点 | Q21 刚过去的钟点按现在算，打提示 | 过 |
+| | Q22 `now` 写法 | 过 |
+| | Q23 kill 早于 no-start 报错，原来的时间窗不变 | 过 |
+| | Q24 不是今天的时刻，排队页带日期 | 过 |
+| P1-4 急停 | Q25 在跑的被停掉（killed / pause），排着的不开，排队程序自己退出 | 过 |
+| | Q26 急停中 patrol 不报 runner-down、pc-idle | 过 |
+| | Q27 resume 以后排着的照常跑；被急停停掉的不自动重排 | 过 |
+
+P1 里另外三条是规矩和文档，没有程序判法：
+- **P1-2 只提交写明的路径**：写进了 [worker.md](roles/worker.md) 第 7 条和 AGENTS.md。第二期这几次提交本身也照做，都是 `git add -- <路径>` 加 `git commit … -- <路径>`。
+- **P1-5 看门狗更省**：写进了 [watchdog.md](roles/watchdog.md)（v2.1）：
+  - 会话列表只在 :00 和 :30 两轮看，`limit` 要给够；
+  - 下一轮定在下一个整 10 分；
+  - 自己到 15 万就换新的。
+- **P1-1 的规矩部分**：写进了 [router.md](roles/router.md)「发布类动作」、worker.md 第 8 条、AGENTS.md 和 [runbook](runbook.md)。
+
+`check-private.sh` 查提交信息：在一个临时克隆里放了一条带假用户目录、假邮箱、假会话 id 的提交信息。三条都报出来了；尾注里的 `Claude-Session` 那行没报。
+
+### 7.3 文档改正
+
+| 原来写的 | 改成 | 在哪 |
+|---|---|---|
+| 叫醒「最多晚 10 分钟」 | 没有上限保证，原来的使用中实测最长晚过 34 分钟 | design.md 第 3 节、cloud-primitives.md「send_later」 |
+| 上下文用量字段 `context_usage.used_tokens` | `external_metadata.context_usage.used_tokens` | cloud-primitives.md、worker.md、watchdog.md |
+| `list_sessions` 一次列全部 | 默认只给 20 条，要给 `limit` 或翻页 | cloud-primitives.md、watchdog.md |
+| 总调度不读代码「和原型 shared.md:5 同一条」 | 总调度比原型宽：还定判法、做验收抽查，读 gate 结果和 run log，不读代码和原始日志 | router.md、design.md 第 2 节 |
+| （隐含）总调度也会换会话 | 默认长驻加自动压缩，写成这条线的参数，可以配成「超过 N 万在票的边界换」 | router.md「这条线的参数」「压缩以后」、design.md 第 5 节 |
+
+### 7.4 还没做的
+
+- **6.5 信箱 PR 直推**：要建私有仓库、往 GitHub 发评论，都要用户本人点头，这期没动。实测办法见 6.5。
+- **推送**：分支 `phase2` 只在容器里。推到公开仓库之前，要用户本人在这个会话里说一句。
+- **Windows CI**：第二期的代码没在 Windows 上跑过。推上去以后 CI 会跑。可能出问题的地方：
+  - Q15、Q20、Q25 的时限都是 2 秒，Windows 上起 pwsh 慢；
+  - T10–T13 的 `git worktree` 路径要经 `canonical()` 比较。
+
+### 7.5 交接要点
+
+- 代码：
+  - `src/queue.ts` 的 `runLoop` 用 `Slot`（检查 / 作业两段）和 `Hook` 两个结构；
+  - 急停是 `state.paused`，`isPaused()` 在 `pickNext` 和排队程序里都看；
+  - `publish` 的校验在 `src/ticket.ts` 的 `readPublish`，dispatch 和 gate 都调它。
+- 测试编号用到 Q27、T16、P7、G8、C5。下一个新场景从 Q28、T17 起。

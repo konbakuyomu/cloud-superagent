@@ -7,13 +7,13 @@
 ```sh
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # node test/dispatch.test.mjs：39 个场景，约 1 分钟
+npm test            # node test/dispatch.test.mjs：63 个场景，约 1.5 分钟
 ```
 
 - 要 Node 20.6+ 和 git（测试会在临时目录里建 git 仓库、做提交）。不用网络，不用 Claude。
 - 每个场景用自己的临时数据目录（`CSA_DATA_DIR`）和临时仓库，互不影响，不碰你机器上的任何状态。
 - 测试起子进程一律 `node bin/csa.mjs …`，**不经 shell**，所以 Windows 上参数也原样传过去。被排的作业本身经 shell 跑（Windows pwsh，其他 bash）。
-- 有几项和时间有关（排队程序 150 ms 一跳、时间窗 `+5s` / `+6s`）。很慢的机器上偶发失败时，先看是不是这几项（Q7–Q10）。
+- 有几项和时间有关（排队程序 150 ms 一跳、时间窗 `+5s` / `+6s`、钩子和检查的时限 2 秒）。很慢的机器上偶发失败时，先看是不是这几项（Q7–Q10、Q15、Q20、Q25）。
 - CI：`.github/workflows/ci.yml`，ubuntu-latest 和 windows-latest 都跑 typecheck 和 test。
 
 ## 代码在哪
@@ -21,15 +21,15 @@ npm test            # node test/dispatch.test.mjs：39 个场景，约 1 分钟
 | 文件 | 内容 |
 |---|---|
 | `src/common.ts` | 数据目录、原子写 JSON、目录锁、时长解析、子进程和进程树、简易 glob、路径规范化 |
-| `src/queue.ts` | `csa queue`：排队状态、挑下一项、排队程序本体、排队页 |
-| `src/ticket.ts` | `csa ticket`：读票、判法哈希、台账 |
+| `src/queue.ts` | `csa queue`：排队状态、挑下一项、急停、排队程序本体（作业槽位、开跑前检查、结束事件和钩子）、排队页 |
+| `src/ticket.ts` | `csa ticket`：读票、判法哈希、`publish`、台账、`show` 卡片、`--prepare` 建 worktree |
 | `src/gate.ts` | `csa gate`：跑检查、查范围和禁区 |
 | `src/patrol.ts` | `csa patrol`：异常码 |
 | `src/cli.ts` | 参数解析和统一出错处理 |
 | `bin/*.mjs` | 入口：用 tsx 直接跑 TypeScript，不编译 |
 | `test/dispatch.test.mjs` | 场景测试 |
 
-约定的文字版在 [docs/cli.md](docs/cli.md)；为什么这样设计在 [docs/design.md](docs/design.md)。
+约定的文字版在 [docs/cli.md](docs/cli.md)；为什么这样设计在 [docs/design.md](docs/design.md)；出事怎么办在 [docs/runbook.md](docs/runbook.md)。
 
 ## 约定
 
@@ -39,12 +39,15 @@ npm test            # node test/dispatch.test.mjs：39 个场景，约 1 分钟
 - **不带个人默认值**：不写死任何人的路径、账号、域名。数据目录只来自 `--data-dir`、`CSA_DATA_DIR` 或平台的通用状态目录。
 - **判法哈希的范围**是对外约定（`src/ticket.ts` 的 `readTicket`）：票头除 `owner`、`session`、`status` 外的字段 + 「**达标」段 + 全部 gate 块。改它会让已经派出的票全部报 `contract-changed`，要在 run log 里写清楚。
 - **文字**：给人看的输出和文档用中文，短句，先说结论。命令、文件名、字段名保持英文。
-- **测试**：新行为先加场景，编号接着用（Q / P / T / G / C）。照搬自原仓库的 34 项（Q1–Q13、P1–P7、T1–T6、G1–G8）不改判法，只能改调用方式。
-- **私人信息**：仓库里不能出现个人路径（盘符、用户目录）、会话 id、定时任务 id、邮箱、私人域名、令牌，以及具体硬件项目的数据。提交前跑 `scripts/check-private.sh`（用法见 [docs/run-log.md](docs/run-log.md)「去私人信息」）；私人词表放仓库以外，不要提交。
+- **测试**：新行为先加场景，编号接着用（Q / P / T / G / C）。照搬自原仓库的 34 项（Q1–Q13、P1–P7、T1–T6、G1–G8）不改判法，只能改调用方式。第二期各项的判法在 [docs/run-log.md](docs/run-log.md) 第 6 节，事先定好，也不改。
+- **提交**：只提交写明的路径（`git add -- <路径>`、`git commit -m … -- <路径>`），不用 `git add -A`、`git commit -a`、`git stash`。这条规矩是写给共用工作区的，在这里也照做。
+- **发布类动作**（建仓库、改可见性、推送、开 PR、发评论、往外传文件）：只认用户本人在执行动作的那个会话里说的话，写明哪个仓库、哪些动作。别的会话转来的同意不算。
+- **私人信息**：仓库里的文件和提交信息都不能出现个人路径（盘符、用户目录）、会话 id、定时任务 id、邮箱、私人域名、令牌，以及具体硬件项目的数据。提交前跑 `scripts/check-private.sh`，它查文件也查全部提交信息（用法见 [docs/run-log.md](docs/run-log.md)「去私人信息」）；私人词表放仓库以外，不要提交。
+- **唯一的例外**：提交信息尾注里的两行，`Co-Authored-By: Claude …`（署名）和 `Claude-Session: https://claude.ai/code/session_…`（会话链接）。会话链接里有会话 id，但只有会话的主人登录后才打得开；这是写提交的约定，脚本按整行放过这两种格式，别的地方出现会话 id 照样报。
 
 ## 审的时候值得看的地方
 
-- `src/queue.ts` 的 `runLoop`：单例、心跳、孤儿作业、时间窗到点后的退出条件。
+- `src/queue.ts` 的 `runLoop`：单例、心跳、孤儿作业、时间窗和急停时的退出条件；`Slot`（检查 / 作业两段）和 `Hook`（结束钩子）两个结构。
 - `src/gate.ts` 的 `changedFiles`：有分支和没分支两种范围怎么算。
 - `src/common.ts` 的 `shellArgs` / `joinCommand`：PowerShell 退出码怎么带出来，多参数怎么加引号。
 - 文档里引用 DeepSeek 原型的 `文件:行` 都按提交 `6337fc8`，可以对着原型核。

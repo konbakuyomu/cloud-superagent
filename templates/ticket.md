@@ -4,9 +4,13 @@ line: <线的 id，和 csa ticket init 登记的一样>
 owner: <负责的子会话代号，例：B>          # 换人只改这一行，判法哈希不变
 authority: CLAUDE.md#授权（第 <起>–<止> 行）  # 子会话开工前在执行机上核对这一节
 scope:                                    # 能改哪些仓库的哪些路径；仓库名默认是线所在仓库上一级目录里同名的文件夹
-  <代码仓库>: { branch: <这张票的分支>, base_branch: main, path: <worktree 目录，可省>, paths: ["src/<模块>*.ts", "test/<模块>*.test.mjs"] }
+  <代码仓库>: { branch: <这张票的分支>, base_branch: main, path: <worktree 目录，可省；写了 dispatch --prepare 就建它>, paths: ["src/<模块>*.ts", "test/<模块>*.test.mjs"] }
   <线所在仓库>: { paths: ["docs/review/t<票号>-*.md", "<线的目录>/issues/<票号>-*.md"] }   # 共用工作区默认只提示，要严格查加 strict: true
 forbid: ["<生成物或不许碰的目录>/**", "git push", "批量删除"]   # 路径 glob 由 gate 查，其余留给总调度
+publish: []                              # 发布类动作：不许就写 []。要的话一项一行：- { repo: <owner/name>, actions: [push, pr] }
+                                          # 动作只能是 create-repo、visibility、push、pr、comment、upload；写了只是「可以问」，
+                                          # 每一件仍要用户本人在执行动作的那个会话里说，总调度不转述同意
+run_log: docs/review/t<票号>-run.md        # 可省；csa ticket show 用它给出 run log 的位置
 pc_budget: <执行机作业总时长，例：2 × 15 min>
 stop_if: ["要花钱", "要动执行机上仓库以外的设置", "判法写的前提不成立"]
 ---
