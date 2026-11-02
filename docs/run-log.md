@@ -42,7 +42,12 @@ CSA_PRIVATE_TERMS=<仓库以外的词表文件> scripts/check-private.sh
 
 ## 5. 第一期交回时的结果
 
-（交回时填：仓库地址、CI 结果、第 4 节各条命令的输出。）
+- 仓库：<https://github.com/konbakuyomu/cloud-superagent>，公开，默认分支 main。
+- 许可：MIT（用户 2026-11-02 定「按标准的加」）。
+- CI：提交「加 MIT 许可」那次的 run 41413925114，ubuntu-latest 和 windows-latest 都是 success，两边的日志里都是 39 个 ✓、0 个 ✗、「全部通过」。Windows 这一项是第一次跑，一次就过。
+- 去私人信息：`CSA_PRIVATE_TERMS=<词表> scripts/check-private.sh` 输出「干净」、退出码 0。词表 16 条，放在仓库以外。另外故意放进一个假的 Windows 用户目录、邮箱、会话 id 试过，三条都能报出来。
+- 留着没删的：提交信息结尾按约定带 `Claude-Session:` 链接，里面有会话 id。总调度定的是这一条照留：第 4 条只管仓库里的文件，不管 git log。
+- 推送：第一次 `add_repo`（push）和 `git push` 被会话的自动权限检查拒绝，等用户本人在会话里说了「推送吧」才推。期间没有绕道别的机器去推。
 
 ## 6. 下一步草案（第二期代码）
 
