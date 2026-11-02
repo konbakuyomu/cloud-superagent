@@ -19,6 +19,8 @@ export interface TicketEntry {
   contract_sha: string; heads: Record<string, string>; dispatched_at: string; updated_at: string;
   history: { at: string; status?: Status; note?: string; contract_sha?: string }[];
   gate?: { at: string; verdict: string; file: string };
+  /** dispatch --prepare 建好或核过的 worktree：仓库名 → 目录。 */
+  prepared?: Record<string, string>;
 }
 export interface Ledger { line: string; tickets: Record<string, TicketEntry> }
 
@@ -138,11 +140,57 @@ export function init(opts: { dir: string; id?: string; authFile?: string; authHe
   return line;
 }
 
-export function dispatch(lineDir: string, id: string, opts: { owner?: string; session?: string; note?: string }) {
+const reopenable = (old: TicketEntry | undefined) => !(old && OPEN.includes(old.status) && old.status !== 'dispatched');
+
+/**
+ * dispatch --prepare：票头 scope 里同时写了 branch 和 path 的仓库，path 不在就建 worktree。
+ * 源仓库是线所在仓库上一级目录里和仓库名同名的文件夹（或 scope 里的 repo 字段）。
+ * 先把所有仓库都核一遍，有一个不行就整次失败、什么都不改；都行了再动手。已经是这个分支的 worktree 就不动。
+ */
+export function prepareWorktrees(lineRepo: string, front: Record<string, any>) {
+  const plans: { key: string; source: string; target: string; branch: string; base: string; exists: boolean; branchExists: boolean }[] = [];
+  for (const repo of scopeRepos(lineRepo, front)) {
+    const { branch, path } = repo.entry;
+    if (!branch || !path) continue;
+    const base = repo.entry.base_branch ?? 'main';
+    const source = resolve(dirname(lineRepo), repo.entry.repo ?? repo.key);
+    const common = git(source, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    if (!common.ok) fail(`${repo.key}：源仓库 ${source} 不是 git 仓库`);
+    const target = repo.dir;
+    if (existsSync(target)) {
+      const theirs = git(target, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+      const top = git(target, ['rev-parse', '--show-toplevel']);
+      if (!theirs.ok || !top.ok || inside(top.out, target) !== '' || inside(common.out, theirs.out) !== '') fail(`${repo.key}：${target} 已经存在，但不是 ${source} 的 worktree；挪开或改票头的 path`);
+      const current = git(target, ['rev-parse', '--abbrev-ref', 'HEAD']).out;
+      if (current !== branch) fail(`${repo.key}：${target} 是 worktree，但在分支 ${current}，票要的是 ${branch}`);
+      plans.push({ key: repo.key, source, target, branch, base, exists: true, branchExists: true });
+    } else {
+      const branchExists = git(source, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).ok;
+      if (!branchExists && !git(source, ['rev-parse', '--verify', '--quiet', base]).ok) fail(`${repo.key}：基准分支 ${base} 不存在`);
+      plans.push({ key: repo.key, source, target, branch, base, exists: false, branchExists });
+    }
+  }
+  const prepared: Record<string, string> = {};
+  for (const plan of plans) {
+    if (!plan.exists) {
+      const r = plan.branchExists
+        ? git(plan.source, ['worktree', 'add', plan.target, plan.branch])
+        : git(plan.source, ['worktree', 'add', '-b', plan.branch, plan.target, plan.base]);
+      if (!r.ok) fail(`${plan.key}：git worktree add 失败：${r.err}`);
+    }
+    prepared[plan.key] = plan.target;
+  }
+  return prepared;
+}
+
+export function dispatch(lineDir: string, id: string, opts: { owner?: string; session?: string; note?: string; prepare?: boolean }) {
   const file = findTicketFile(lineDir, id);
   const ticket = readTicket(file);
   if (!ticket.hasCriteria && !ticket.gates.length) fail(`票 ${id} 没有「**达标」段也没有 gate 块：先把判法写进票再派`);
   const lineRepo = repoRoot(lineDir);
+  const already = loadLedger(lineDir).tickets[id];
+  if (!reopenable(already)) fail(`票 ${id} 已经${STATUS_TEXT[already!.status]}，不能重派；要改判法先和用户定，再 csa ticket set ${id} abandoned 后另开一张`);
+  const prepared = opts.prepare ? prepareWorktrees(lineRepo, ticket.front) : undefined;
   const heads: Record<string, string> = {};
   for (const repo of scopeRepos(lineRepo, ticket.front)) {
     const head = existsSync(repo.dir) ? git(repo.dir, ['rev-parse', 'HEAD']) : null;
@@ -150,12 +198,12 @@ export function dispatch(lineDir: string, id: string, opts: { owner?: string; se
   }
   return update(lineDir, ledger => {
     const old = ledger.tickets[id];
-    if (old && OPEN.includes(old.status) && old.status !== 'dispatched') fail(`票 ${id} 已经${STATUS_TEXT[old.status]}，不能重派；要改判法先和用户定，再 csa ticket set ${id} abandoned 后另开一张`);
+    if (!reopenable(old)) fail(`票 ${id} 已经${STATUS_TEXT[old.status]}，不能重派；要改判法先和用户定，再 csa ticket set ${id} abandoned 后另开一张`);
     const now = iso();
     ledger.tickets[id] = {
       ticket: id, status: 'dispatched', owner: opts.owner ?? ticket.front.owner, session: opts.session ?? ticket.front.session,
       file: inside(lineDir, file) ?? file, contract_sha: ticket.contract_sha, heads,
-      dispatched_at: now, updated_at: now,
+      dispatched_at: now, updated_at: now, ...(prepared ? { prepared } : {}),
       history: [...(old?.history ?? []), { at: now, status: 'dispatched', note: opts.note, contract_sha: ticket.contract_sha }],
     };
   }).tickets[id];
@@ -203,4 +251,66 @@ export function recordGate(lineDir: string, id: string, gate: { verdict: string;
     entry.updated_at = at;
     entry.history.push({ at, status: entry.status, note: `gate ${gate.verdict}` });
   });
+}
+
+/** 每个状态的下一跳：谁该做什么。 */
+export const NEXT_TEXT: Record<Status, string> = {
+  dispatched: '子会话核授权、核票，两条都过就 csa ticket set <票> started',
+  started: '子会话在做；交回前跑 csa gate <票>',
+  'handed-in': '总调度读 gate 结果、判 human 项，再 csa ticket accept <票> 或 set <票> rejected',
+  'gate-failed': '子会话看 gate 结果里哪条不过，改完再跑 csa gate <票>',
+  accepted: '已收尾，没有下一步',
+  rejected: '子会话按验收意见改；改不了就由总调度作废重开',
+  blocked: '总调度看卡在哪，补材料或改票',
+  'waiting-user': '等用户定',
+  abandoned: '已作废，没有下一步',
+};
+
+/**
+ * 一张票的卡片：台账一条 + 这张票的排队作业 + gate 结论 + 各仓库派单时和现在的提交 + run log + 下一跳。
+ * 纯读：不写任何文件，不碰锁。
+ */
+export function show(lineDir: string, id: string, queueItems: { id: string; ticket?: string; state: string; rc?: number | null; log: string; acked_at?: string; owner: string }[]) {
+  const entry = loadLedger(lineDir).tickets[id] ?? fail(`台账里没有票 ${id}：先 csa ticket dispatch ${id}`);
+  const file = join(lineDir, entry.file);
+  const front = existsSync(file) ? readTicket(file).front : {};
+  const lineRepo = repoRoot(lineDir);
+  const heads: Record<string, { dispatched: string | null; now: string | null }> = {};
+  for (const repo of scopeRepos(lineRepo, front)) {
+    const head = existsSync(repo.dir) ? git(repo.dir, ['rev-parse', 'HEAD']) : null;
+    heads[repo.key] = { dispatched: entry.heads[repo.key] ?? null, now: head?.ok ? head.out : null };
+  }
+  for (const key of Object.keys(entry.heads)) heads[key] ??= { dispatched: entry.heads[key], now: null };
+  const jobs = queueItems.filter(i => i.ticket === id)
+    .map(i => ({ id: i.id, owner: i.owner, state: i.state, rc: i.rc ?? null, acked: !!i.acked_at, log: i.log }));
+  const gate = entry.gate ? { verdict: entry.gate.verdict, at: entry.gate.at, file: entry.gate.file, md: entry.gate.file.replace(/\.json$/, '.md') } : null;
+  let runLog: string | null = null;
+  if (typeof front.run_log === 'string') runLog = isAbsolute(front.run_log) ? front.run_log : join(lineRepo, front.run_log);
+  else {
+    const review = join(lineRepo, 'docs', 'review');
+    const hit = existsSync(review) ? readdirSync(review).find(n => n.toLowerCase().startsWith(`t${id.toLowerCase()}-`) && n.endsWith('.md')) : undefined;
+    if (hit) runLog = join(review, hit);
+  }
+  let next = NEXT_TEXT[entry.status];
+  const running = jobs.find(j => j.state === 'running' || j.state === 'queued');
+  const unacked = jobs.find(j => !['running', 'queued', 'cancelled', 'skipped'].includes(j.state) && !j.acked);
+  if (entry.status === 'started' && running) next = `等作业 ${running.id} 跑完（${running.state}）`;
+  else if (entry.status === 'started' && unacked) next = `取作业 ${unacked.id} 的结果（csa queue log），取完 csa queue ack ${unacked.id}`;
+  return {
+    ticket: id, status: entry.status, status_text: STATUS_TEXT[entry.status], owner: entry.owner ?? null, session: entry.session ?? null,
+    file, contract_sha: entry.contract_sha, updated_at: entry.updated_at, jobs, gate, heads, run_log: runLog, next: next.replace(/<票>/g, id),
+  };
+}
+
+export function showText(card: ReturnType<typeof show>) {
+  const short = (sha: string | null) => sha ? sha.slice(0, 8) : '—';
+  return [
+    `票 ${card.ticket}：${card.status_text}，${card.owner ?? '?'}${card.session ? `（${card.session}）` : ''}，更新 ${new Date(card.updated_at).toLocaleString('sv-SE')}`,
+    `票文件：${card.file}`,
+    `作业：${card.jobs.length ? card.jobs.map(j => `${j.id} ${j.state}${j.rc !== null ? ` rc ${j.rc}` : ''}${j.acked ? '' : j.state === 'running' || j.state === 'queued' ? '' : ' 未取'}`).join('；') : '无'}`,
+    `gate：${card.gate ? `${card.gate.verdict}，${card.gate.md}` : '还没跑'}`,
+    `提交：${Object.entries(card.heads).map(([k, h]) => `${k} ${short(h.dispatched)} → ${short(h.now)}`).join('；') || '票头没有 scope'}`,
+    `run log：${card.run_log ?? '没找到'}`,
+    `下一跳：${card.next}`,
+  ].join('\n');
 }

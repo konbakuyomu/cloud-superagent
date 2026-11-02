@@ -4,7 +4,7 @@ import { CliError, fail, joinCommand, parseDuration } from './common.ts';
 import { gate } from './gate.ts';
 import { patrol, patrolText } from './patrol.ts';
 import { ack, add, cancel, loadConfig, logTail, renderView, loadState, RUNNER_HINT, runLoop, saveConfig, setCurfew, status } from './queue.ts';
-import { amend, dispatch, init, loadLedger, resolveLineDir, setStatus, STATUS_TEXT } from './ticket.ts';
+import { amend, dispatch, init, loadLedger, resolveLineDir, setStatus, show, showText, STATUS_TEXT } from './ticket.ts';
 
 export const USAGE = [
   '  csa queue add --owner <会话> --est 12m [--limit 40m] [--ticket 50] [--session <id>] [--note "<说明>"] [--after <作业 id>] [--cwd <目录>] [--if "<开跑前的检查>" [--if-timeout 60s]] -- "<整行命令>"',
@@ -13,7 +13,7 @@ export const USAGE = [
   '  csa queue run [--idle-exit 120]     排队程序本体，用执行机守护进程的后台作业开（例：winhand job_start）',
   '  csa queue config [--add-view <路径>] [--remove-view <路径>] [--shell pwsh|powershell|cmd|bash] [--on-end "<结束钩子>" [--on-end-timeout 30s] | --clear-on-end]',
   '  csa ticket init --dir <线的目录> [--auth-file CLAUDE.md --auth-heading "## 授权"]',
-  '  csa ticket dispatch <票> --owner <会话> [--session <id>] | set <票> <状态> [--note] | amend <票> --reason "<理由>" | list [--json]   （都可加 --dir 或 --line）',
+  '  csa ticket dispatch <票> --owner <会话> [--session <id>] [--prepare] | set <票> <状态> [--note] | amend <票> --reason "<理由>" | show <票> [--json] | list [--json]   （都可加 --dir 或 --line）',
   '  csa gate <票> [--dir <线的目录> | --line <id>] [--out <目录>] [--json]',
   '  csa patrol [--json] [--ack-after 10] [--accept-after 15]   OK 退出码 0，有事退出码 3',
 ];
@@ -114,7 +114,7 @@ function ticketCli(argv: string[]) {
     args: argv, allowPositionals: true,
     options: {
       dir: { type: 'string' }, line: { type: 'string' }, owner: { type: 'string' }, session: { type: 'string' }, note: { type: 'string' },
-      reason: { type: 'string' }, json: { type: 'boolean' }, id: { type: 'string' }, 'auth-file': { type: 'string' }, 'auth-heading': { type: 'string' },
+      reason: { type: 'string' }, json: { type: 'boolean' }, prepare: { type: 'boolean' }, id: { type: 'string' }, 'auth-file': { type: 'string' }, 'auth-heading': { type: 'string' },
     },
   });
   const [action, id, value] = positionals;
@@ -126,17 +126,22 @@ function ticketCli(argv: string[]) {
   const lineDir = resolveLineDir(o);
   const need = () => id ?? fail('要票号');
   if (action === 'dispatch') {
-    const e = dispatch(lineDir, need(), { owner: o.owner, session: o.session, note: o.note });
-    console.log(`票 ${e.ticket} 已派给 ${e.owner ?? '?'}，判法哈希 ${e.contract_sha.slice(0, 12)}${Object.keys(e.heads).length ? `，记下了 ${Object.keys(e.heads).join('、')} 的当前提交` : ''}`);
+    const e = dispatch(lineDir, need(), { owner: o.owner, session: o.session, note: o.note, prepare: o.prepare });
+    console.log(`票 ${e.ticket} 已派给 ${e.owner ?? '?'}，判法哈希 ${e.contract_sha.slice(0, 12)}${Object.keys(e.heads).length ? `，记下了 ${Object.keys(e.heads).join('、')} 的当前提交` : ''}${e.prepared ? `；worktree：${Object.entries(e.prepared).map(([k, v]) => `${k} ${v}`).join('、')}` : ''}`);
     return 0;
   }
   if (action === 'set') { const e = setStatus(lineDir, need(), value ?? fail('要状态'), o.note); console.log(`票 ${e.ticket}：${STATUS_TEXT[e.status]}`); return 0; }
   if (action === 'accept') { const e = setStatus(lineDir, need(), 'accepted', o.note); console.log(`票 ${e.ticket}：${STATUS_TEXT[e.status]}`); return 0; }
   if (action === 'amend') { const e = amend(lineDir, need(), o.reason!); console.log(`票 ${e.ticket} 的判法改了，新哈希 ${e.contract_sha.slice(0, 12)}`); return 0; }
-  if (action === 'list' || action === 'show' || action === undefined) {
+  if (action === 'show') {
+    const card = show(lineDir, need(), loadState().items);
+    print(card, o.json, () => showText(card));
+    return 0;
+  }
+  if (action === 'list' || action === undefined) {
     const ledger = loadLedger(lineDir);
-    const entries = Object.values(ledger.tickets).filter(e => action !== 'show' || e.ticket === id);
-    print(action === 'show' ? entries[0] ?? null : ledger, o.json, () => entries.map(e => `- 票 ${e.ticket}：${STATUS_TEXT[e.status]}，${e.owner ?? '?'}${e.gate ? `，gate ${e.gate.verdict}` : ''}，更新 ${new Date(e.updated_at).toLocaleString('sv-SE')}`).join('\n') || '（台账是空的）');
+    const entries = Object.values(ledger.tickets);
+    print(ledger, o.json, () => entries.map(e => `- 票 ${e.ticket}：${STATUS_TEXT[e.status]}，${e.owner ?? '?'}${e.gate ? `，gate ${e.gate.verdict}` : ''}，更新 ${new Date(e.updated_at).toLocaleString('sv-SE')}`).join('\n') || '（台账是空的）');
     return 0;
   }
   return fail(`csa ticket 不认识「${action}」\n${USAGE.slice(5, 7).join('\n')}`);

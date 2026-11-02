@@ -4,7 +4,7 @@
 // Q/P/T/G 共 34 项照搬自原来的私有任务仓库的调度测试，只把 board 换成 csa、改成不经 shell 起子进程；C1–C5 是这个仓库加的。
 // `npm test` 会跑；Linux、macOS、Windows 都能跑，只要有 node 和 git。
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -213,6 +213,54 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   g = board(d, ['gate', '64', '--dir', lineDir, '--json']);
   r = JSON.parse(g.out);
   check('G8 按分支查范围：分叉点以来分支上的改动都算，范围外的照报', r.findings.some(f => f.code === 'out-of-scope' && f.message.includes('notes.txt') && !f.message.includes('b.py')), g.out);
+
+  // 第二期 6.1：csa ticket show
+  ticket('65', { front: scopeFront(), criteria: '1. 过。', gateBlock: passGate });
+  board(d, ['ticket', 'dispatch', '65', '--dir', lineDir, '--owner', 'B', '--session', 'sess-b']);
+  write(join(lineRepo, 'docs', 'review', 't65-run.md'), '# run log\n');
+  const job65 = JSON.parse(board(d, ['queue', 'add', '--owner', 'B', '--ticket', '65', '--est', '1s', '--json', '--', node('0')]).out).id;
+  await runner(d);
+  board(d, ['gate', '65', '--dir', lineDir]);
+  const snapshot = () => [d, lineDir, lineRepo].flatMap(root => {
+    const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(e => e.name === '.git' ? [] : e.isDirectory() ? walk(join(dir, e.name)) : [`${join(dir, e.name)}@${statSync(join(dir, e.name)).mtimeMs}`]);
+    return walk(root);
+  }).sort().join('\n');
+  const before65 = snapshot();
+  const sj = board(d, ['ticket', 'show', '65', '--dir', lineDir, '--json']);
+  const card = JSON.parse(sj.out);
+  check('T7 show --json 有 status、jobs[0].id、gate.verdict 和 gate.file、heads.<仓库>.dispatched 和 .now、next',
+    sj.code === 0 && card.status === 'handed-in' && card.jobs[0]?.id === job65 && card.gate?.verdict === 'pass' && card.gate?.file.endsWith('t65.json')
+      && card.heads['code-repo']?.dispatched && card.heads['code-repo']?.now && card.run_log?.endsWith('t65-run.md') && card.next.includes('accept'), sj.out);
+  const st = board(d, ['ticket', 'show', '65', '--dir', lineDir]);
+  const stLines = st.out.trim().split('\n');
+  check('T8 文本输出每一项一行，下一跳在最后一行', st.code === 0 && stLines.length === 7 && stLines.at(-1).startsWith('下一跳：') && stLines.some(l => l.startsWith('gate：pass')), st.out);
+  check('T9 show 前后数据目录、线的目录和线所在仓库里所有文件的 mtime 不变', snapshot() === before65);
+
+  // 第二期 6.4：csa ticket dispatch --prepare
+  const wt = join(parent, 'code-repo-t66');
+  const branches = () => git(codeRepo, 'branch', '--format=%(refname:short)').stdout.trim().split('\n').sort().join(',');
+  ticket('66', { front: 'owner: B\nscope:\n  code-repo: { branch: t66, base_branch: main, path: code-repo-t66, paths: ["tools/**"] }', criteria: '1. 过。', gateBlock: passGate });
+  const p66 = board(d, ['ticket', 'dispatch', '66', '--dir', lineDir, '--owner', 'B', '--prepare']);
+  const wtBranch = git(wt, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.trim();
+  const fork = git(codeRepo, 'merge-base', 'main', 't66').stdout.trim();
+  check('T10 --prepare 后 path 是一个 worktree，当前分支是 branch，分叉点是 base_branch 的 HEAD',
+    p66.code === 0 && existsSync(join(wt, 'tools', 'a.py')) && wtBranch === 't66' && fork === git(codeRepo, 'rev-parse', 'main').stdout.trim() && ledger().tickets['66'].prepared?.['code-repo'], p66.out);
+  const branchesBefore = branches();
+  const again = board(d, ['ticket', 'dispatch', '66', '--dir', lineDir, '--owner', 'B', '--prepare']);
+  check('T11 再派一次不报错，不新建分支', again.code === 0 && branches() === branchesBefore, again.out);
+  mkdirSync(join(parent, 'code-repo-t67'), { recursive: true });
+  write(join(parent, 'code-repo-t67', 'keep.txt'), 'x\n');
+  ticket('67', { front: 'owner: B\nscope:\n  code-repo: { branch: t67, base_branch: main, path: code-repo-t67, paths: ["tools/**"] }', criteria: '1. 过。', gateBlock: passGate });
+  const b67 = branches();
+  const p67 = board(d, ['ticket', 'dispatch', '67', '--dir', lineDir, '--owner', 'B', '--prepare']);
+  check('T12 path 已经存在但不是 worktree：退出码 1，台账没有这张票，分支列表不变', p67.code === 1 && !ledger().tickets['67'] && branches() === b67, p67.out);
+  board(d, ['ticket', 'set', '66', 'started', '--dir', lineDir]);
+  write(join(wt, 'tools', 'c.py'), 'print(4)\n');
+  write(join(wt, 'README.md'), 'outside\n');
+  const g66 = board(d, ['gate', '66', '--dir', lineDir, '--json']);
+  const r66 = JSON.parse(g66.out);
+  check('T13 在建好的 worktree 里改一个范围外的文件，csa gate 报 out-of-scope（严格查）',
+    g66.code === 1 && r66.findings.some(f => f.code === 'out-of-scope' && f.message.includes('README.md') && !f.message.includes('c.py')), g66.out);
 }
 
 // ---------- 命令行本身（这个仓库加的） ----------
