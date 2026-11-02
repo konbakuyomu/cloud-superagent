@@ -3,13 +3,14 @@ import { parseArgs } from 'node:util';
 import { CliError, fail, joinCommand, parseDuration } from './common.ts';
 import { gate } from './gate.ts';
 import { patrol, patrolText } from './patrol.ts';
-import { ack, add, cancel, loadConfig, logTail, renderView, loadState, RUNNER_HINT, runLoop, saveConfig, setCurfew, status } from './queue.ts';
+import { ack, add, cancel, loadConfig, logTail, pause, renderView, loadState, resume, RUNNER_HINT, runLoop, saveConfig, setCurfew, status } from './queue.ts';
 import { amend, dispatch, init, loadLedger, resolveLineDir, setStatus, show, showText, STATUS_TEXT } from './ticket.ts';
 
 export const USAGE = [
   '  csa queue add --owner <会话> --est 12m [--limit 40m] [--ticket 50] [--session <id>] [--note "<说明>"] [--after <作业 id>] [--cwd <目录>] [--if "<开跑前的检查>" [--if-timeout 60s]] -- "<整行命令>"',
   '  csa queue list | status [--json] | log <作业 id> [--lines 40] | ack <作业 id> [--by <会话>] | cancel <作业 id>',
-  '  csa queue curfew --no-start-after 06:45 --kill-at 06:50 [--note "<出处>"] | --clear',
+  '  csa queue curfew --no-start-after 06:45|now|+30m --kill-at 06:50 [--note "<出处>"] | --clear',
+  '  csa queue pause [--note "<为什么>"] | resume     急停（停掉在跑的、不开新的）和恢复',
   '  csa queue run [--idle-exit 120]     排队程序本体，用执行机守护进程的后台作业开（例：winhand job_start）',
   '  csa queue config [--add-view <路径>] [--remove-view <路径>] [--shell pwsh|powershell|cmd|bash] [--on-end "<结束钩子>" [--on-end-timeout 30s] | --clear-on-end]',
   '  csa ticket init --dir <线的目录> [--auth-file CLAUDE.md --auth-heading "## 授权"]',
@@ -20,7 +21,7 @@ export const USAGE = [
 
 const print = (value: unknown, json: boolean | undefined, text: () => string) => console.log(json ? JSON.stringify(value, null, 2) : text());
 
-const HELP: Record<string, number[]> = { queue: [0, 1, 2, 3, 4], ticket: [5, 6], gate: [7], patrol: [8] };
+const HELP: Record<string, number[]> = { queue: [0, 1, 2, 3, 4, 5], ticket: [6, 7], gate: [8], patrol: [9] };
 
 /** 去掉全局的 --data-dir <目录>（或 --data-dir=<目录>），写进 CSA_DATA_DIR，后面各命令都从那里取。 */
 export function takeDataDir(argv: string[]) {
@@ -89,8 +90,19 @@ async function queueCli(argv: string[]) {
   if (action === 'ack') { const item = ack(rest[0] ?? fail('要作业 id'), o.by); console.log(`${item.id} 记为已取`); return 0; }
   if (action === 'cancel') { console.log(cancel(rest[0] ?? fail('要作业 id'))); return 0; }
   if (action === 'curfew') {
-    const c = setCurfew({ noStartAfter: o['no-start-after'], killAt: o['kill-at'], note: o.note, clear: o.clear });
+    const { curfew: c, hints } = setCurfew({ noStartAfter: o['no-start-after'], killAt: o['kill-at'], note: o.note, clear: o.clear });
+    for (const hint of hints) console.log(`提示：${hint}`);
     console.log(c ? `时间窗：${c.no_start_after ? `${new Date(c.no_start_after).toLocaleString('sv-SE')} 以后不开新作业；` : ''}${c.kill_at ? `${new Date(c.kill_at).toLocaleString('sv-SE')} 停掉还在跑的` : ''}` : `时间窗已解除。排着的作业要开，先确认排队程序在跑：${RUNNER_HINT}`);
+    return 0;
+  }
+  if (action === 'pause') {
+    const r = pause(o.note);
+    print(r, o.json, () => `急停：不再开新作业${r.running.length ? `；正在跑的 ${r.running.join('、')} ${r.runner_alive ? '几秒内被停掉' : '要等排队程序起来才会被停（它没在跑）'}` : ''}。恢复用 csa queue resume`);
+    return 0;
+  }
+  if (action === 'resume') {
+    const r = resume();
+    print(r, o.json, () => `${r.was ? '急停已解除' : '本来就没有急停'}；排着 ${r.queued} 项${r.queued && !r.runner_alive ? `。${RUNNER_HINT}` : ''}`);
     return 0;
   }
   if (action === 'run') return runLoop(Number(o['idle-exit'] ?? loadConfig().idle_exit_s ?? 120), Number(o.tick ?? 2000));
@@ -106,7 +118,7 @@ async function queueCli(argv: string[]) {
     console.log(JSON.stringify(config, null, 2));
     return 0;
   }
-  return fail(`csa queue 不认识「${action}」\n${USAGE.slice(0, 5).join('\n')}`);
+  return fail(`csa queue 不认识「${action}」\n${USAGE.slice(0, 6).join('\n')}`);
 }
 
 function ticketCli(argv: string[]) {
@@ -144,7 +156,7 @@ function ticketCli(argv: string[]) {
     print(ledger, o.json, () => entries.map(e => `- 票 ${e.ticket}：${STATUS_TEXT[e.status]}，${e.owner ?? '?'}${e.gate ? `，gate ${e.gate.verdict}` : ''}，更新 ${new Date(e.updated_at).toLocaleString('sv-SE')}`).join('\n') || '（台账是空的）');
     return 0;
   }
-  return fail(`csa ticket 不认识「${action}」\n${USAGE.slice(5, 7).join('\n')}`);
+  return fail(`csa ticket 不认识「${action}」\n${USAGE.slice(6, 8).join('\n')}`);
 }
 
 function gateCli(argv: string[]) {
@@ -152,7 +164,7 @@ function gateCli(argv: string[]) {
     args: argv, allowPositionals: true,
     options: { dir: { type: 'string' }, line: { type: 'string' }, out: { type: 'string' }, json: { type: 'boolean' }, 'no-ledger': { type: 'boolean' }, shell: { type: 'string' } },
   });
-  const id = positionals[0] ?? fail(`要票号\n${USAGE[7]}`);
+  const id = positionals[0] ?? fail(`要票号\n${USAGE[8]}`);
   const r = gate(resolveLineDir(o), id, { out: o.out, noLedger: o['no-ledger'], shell: o.shell });
   print(r, o.json, () => [
     `票 ${id} gate：${{ pass: '过', 'pending-human': '自动项都过，还有要总调度判的', fail: '不过' }[r.verdict]}（${r.out}）`,

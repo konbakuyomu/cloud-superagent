@@ -261,6 +261,22 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   const r66 = JSON.parse(g66.out);
   check('T13 在建好的 worktree 里改一个范围外的文件，csa gate 报 out-of-scope（严格查）',
     g66.code === 1 && r66.findings.some(f => f.code === 'out-of-scope' && f.message.includes('README.md') && !f.message.includes('c.py')), g66.out);
+
+  // P1-1：票头 publish
+  ticket('68', { front: `${scopeFront()}\npublish:\n  - { repo: someone/demo, actions: [push, tweet] }`, criteria: '1. 过。', gateBlock: passGate });
+  const p68 = board(d, ['ticket', 'dispatch', '68', '--dir', lineDir, '--owner', 'B']);
+  check('T14 publish 里有不认识的动作：不让派，退出码 1', p68.code === 1 && p68.out.includes('tweet') && !ledger().tickets['68'], p68.out);
+  ticket('69', { front: `${scopeFront()}\npublish:\n  - { repo: someone/demo, actions: [push] }`, criteria: '1. 过。', gateBlock: passGate });
+  board(d, ['ticket', 'dispatch', '69', '--dir', lineDir, '--owner', 'B']);
+  let g69 = JSON.parse(board(d, ['gate', '69', '--dir', lineDir, '--json']).out);
+  const listed = g69.notes.some(n => n.includes('someone/demo') && n.includes('push') && n.includes('本人'));
+  ticket('69', { front: `${scopeFront()}\npublish:\n  - { repo: someone/demo, actions: [push, pr] }`, criteria: '1. 过。', gateBlock: passGate });
+  g69 = JSON.parse(board(d, ['gate', '69', '--dir', lineDir, '--json']).out);
+  check('T15 publish 算进判法：派单后放宽 publish → contract-changed', listed && g69.findings.some(f => f.code === 'contract-changed'), JSON.stringify(g69));
+  ticket('70', { front: scopeFront(), criteria: '1. 过。', gateBlock: passGate });
+  board(d, ['ticket', 'dispatch', '70', '--dir', lineDir, '--owner', 'B']);
+  const g70 = JSON.parse(board(d, ['gate', '70', '--dir', lineDir, '--json']).out);
+  check('T16 没写 publish 的票，gate 写明不许做任何发布类动作', g70.notes.some(n => n.includes('不许做任何发布类动作')), JSON.stringify(g70.notes));
 }
 
 // ---------- 命令行本身（这个仓库加的） ----------
@@ -354,6 +370,40 @@ const eventLines = d => existsSync(join(d, 'events.jsonl')) ? readFileSync(join(
   check('Q20 --if 超过时限被停，记 skipped、原因写超时；csa patrol 不把 skipped 当 finished-unacked',
     t.state === 'skipped' && t.reason.includes('超时') && Date.now() - started < 30000
       && !JSON.parse(p.out).anomalies.some(a => a.code === 'finished-unacked' && (a.item === t.id || a.item === s.id)), `${JSON.stringify(t)}\n${p.out}`);
+}
+
+// ---------- P1-3：时间窗的钟点；P1-4：急停和恢复 ----------
+{
+  const d = freshData();
+  const hhmm = t => { const x = new Date(t); return `${String(x.getHours()).padStart(2, '0')}:${String(x.getMinutes()).padStart(2, '0')}`; };
+  const r = board(d, ['queue', 'curfew', '--no-start-after', hhmm(Date.now() - 2 * 60_000)]);
+  const c = state(d).curfew;
+  check('Q21 刚过去的钟点按「现在」算，打一行提示', r.code === 0 && Math.abs(Date.parse(c.no_start_after) - Date.now()) < 10_000 && r.out.includes('刚过去'), r.out);
+  const n = board(d, ['queue', 'curfew', '--kill-at', 'now']);
+  check('Q22 now 写法：时刻就是现在', n.code === 0 && Math.abs(Date.parse(state(d).curfew.kill_at) - Date.now()) < 10_000, n.out);
+  const bad = board(d, ['queue', 'curfew', '--no-start-after', '+10m', '--kill-at', '+5m']);
+  check('Q23 --kill-at 早于 --no-start-after：报错，退出码 1，原来的时间窗不变', bad.code === 1 && bad.out.includes('早于') && Math.abs(Date.parse(state(d).curfew.kill_at) - Date.now()) < 60_000, bad.out);
+  board(d, ['queue', 'curfew', '--kill-at', '2099-01-02T03:04:00']);
+  const view = readFileSync(join(d, 'queue.md'), 'utf8');
+  check('Q24 不是今天的时刻，排队页带日期', view.includes('01-02 03:04:00'), view);
+}
+{
+  const d = freshData();
+  board(d, ['queue', 'add', '--owner', 'A', '--est', '30s', '--', node('setTimeout(()=>{},60000)')]);
+  board(d, ['queue', 'add', '--owner', 'B', '--est', '1s', '--', node('0')]);
+  const run = runner(d);
+  for (let i = 0; i < 80 && item(d, 'A').state !== 'running'; i++) await new Promise(r => setTimeout(r, 100));
+  const pz = board(d, ['queue', 'pause', '--note', '电脑要离线']);
+  const started = Date.now();
+  const res = await run;
+  check('Q25 急停：在跑的被停掉（killed，原因 pause），排着的不开，排队程序自己退出',
+    pz.code === 0 && item(d, 'A').state === 'killed' && item(d, 'A').reason === 'pause' && item(d, 'B').state === 'queued' && Date.now() - started < 20000 && readFileSync(join(d, 'queue.md'), 'utf8').includes('急停中'), `${pz.out}\n${res.out}`);
+  const p = board(d, ['patrol', '--json', '--ack-after', '60']);
+  const pj = JSON.parse(p.out);
+  check('Q26 急停中 patrol 不报 runner-down、pc-idle，只记一行说明', p.code === 0 && pj.info.some(i => i.includes('急停中')) && pj.queue.paused === true, p.out);
+  const rs = board(d, ['queue', 'resume']);
+  await runner(d);
+  check('Q27 resume 以后排着的照常跑；被急停停掉的不自动重排', rs.code === 0 && rs.out.includes('急停已解除') && item(d, 'B').state === 'done' && item(d, 'A').state === 'killed', rs.out);
 }
 
 console.log(failed ? `\n${failed} 项没过` : '\n全部通过');

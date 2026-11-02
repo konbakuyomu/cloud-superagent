@@ -140,6 +140,27 @@ export function init(opts: { dir: string; id?: string; authFile?: string; authHe
   return line;
 }
 
+/** 票头 publish 里能写的发布类动作。 */
+export const PUBLISH_ACTIONS = ['create-repo', 'visibility', 'push', 'pr', 'comment', 'upload'] as const;
+
+/**
+ * 票头 publish：这张票允许的发布类动作，每项写明仓库（或去处）和动作。没写、写 [] 或 none 都是「一件都不许」。
+ * 写进票头就算进判法；允许了也只是「可以问」：每一件仍要用户本人在执行动作的那个会话里点头。
+ */
+export function readPublish(front: Record<string, any>) {
+  const raw = front.publish;
+  if (raw === undefined || raw === null || raw === 'none' || (Array.isArray(raw) && !raw.length)) return [];
+  if (!Array.isArray(raw)) fail('票头 publish 要写成列表：- { repo: <owner/name>, actions: [push, pr] }，不许就写 []');
+  return raw.map((entry: any, n: number) => {
+    const repo = typeof entry?.repo === 'string' ? entry.repo : typeof entry?.to === 'string' ? entry.to : null;
+    const actions = Array.isArray(entry?.actions) ? entry.actions : null;
+    if (!repo || !actions?.length) fail(`票头 publish 第 ${n + 1} 项要有 repo（或 to）和非空的 actions`);
+    const unknown = actions.filter((a: unknown) => !PUBLISH_ACTIONS.includes(a as any));
+    if (unknown.length) fail(`票头 publish 第 ${n + 1} 项有不认识的动作：${unknown.join('、')}（只能是 ${PUBLISH_ACTIONS.join('、')}）`);
+    return { repo, actions: actions as string[] };
+  });
+}
+
 const reopenable = (old: TicketEntry | undefined) => !(old && OPEN.includes(old.status) && old.status !== 'dispatched');
 
 /**
@@ -187,6 +208,7 @@ export function dispatch(lineDir: string, id: string, opts: { owner?: string; se
   const file = findTicketFile(lineDir, id);
   const ticket = readTicket(file);
   if (!ticket.hasCriteria && !ticket.gates.length) fail(`票 ${id} 没有「**达标」段也没有 gate 块：先把判法写进票再派`);
+  readPublish(ticket.front);
   const lineRepo = repoRoot(lineDir);
   const already = loadLedger(lineDir).tickets[id];
   if (!reopenable(already)) fail(`票 ${id} 已经${STATUS_TEXT[already!.status]}，不能重派；要改判法先和用户定，再 csa ticket set ${id} abandoned 后另开一张`);

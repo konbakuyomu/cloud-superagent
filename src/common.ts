@@ -119,18 +119,31 @@ export function formatDuration(seconds: number) {
   return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
-/** 本地时间 HH:mm:ss（执行机的钟）。 */
-export const clock = (iso: string | number | Date | null | undefined) =>
-  iso ? new Date(iso).toLocaleTimeString('en-GB', { hour12: false }) : '—';
+/** 本地时间 HH:mm:ss（执行机的钟）；不是今天的，前面带 MM-DD。 */
+export function clock(iso: string | number | Date | null | undefined, now: number | Date = Date.now()) {
+  if (!iso) return '—';
+  const d = new Date(iso), n = new Date(now);
+  const time = d.toLocaleTimeString('en-GB', { hour12: false });
+  if (d.toDateString() === n.toDateString()) return time;
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${time}`;
+}
 
-/** 今天或明天的 HH:mm（本地时间）；已经过了的钟点算明天，除非 allowPast。 */
-export function nextClock(hhmm: string, now = new Date(), allowPast = false) {
+/** 「刚过去」的宽限：过去这么多分钟以内的钟点按「现在」算。 */
+export const JUST_PASSED_MIN = 30;
+
+/**
+ * HH:mm（本地时间）→ 下一个这样的时刻。刚过去 JUST_PASSED_MIN 分钟以内的（包括跨午夜，例如 00:05 时写 23:55）
+ * 按「现在」算，justPassed 为 true，调用方要打一行提示；更早过去的算明天。
+ */
+export function nextClock(hhmm: string, now = new Date()) {
   const match = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
-  if (!match) throw new Error(`钟点写法不认识：${hhmm}（例：06:45）`);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) fail(`钟点写法不认识：${hhmm}（例：06:45、now、+30m）`);
   const at = new Date(now);
   at.setHours(Number(match[1]), Number(match[2]), 0, 0);
-  if (!allowPast && at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1);
-  return at;
+  const day = 86_400_000;
+  const ahead = ((at.getTime() - now.getTime()) % day + day) % day;   // 往后数到这个钟点还要多久
+  if (ahead === 0 || day - ahead <= JUST_PASSED_MIN * 60_000) return { at: new Date(now), justPassed: ahead !== 0 };
+  return { at: new Date(now.getTime() + ahead), justPassed: false };
 }
 
 export function sha256(text: string) {

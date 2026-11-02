@@ -3,7 +3,7 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { git, inside, matchesAny, parseDuration, runCaptured, writeJson, writeText } from './common.ts';
-import { contractChanged, findTicketFile, loadLedger, readTicket, recordGate, repoRoot, scopeRepos } from './ticket.ts';
+import { contractChanged, findTicketFile, loadLedger, readPublish, readTicket, recordGate, repoRoot, scopeRepos } from './ticket.ts';
 import { loadConfig } from './queue.ts';
 
 interface CheckResult { id: string; kind: 'auto' | 'human'; ok: boolean | null; why: string; seconds?: number; code?: number | null; tail?: string }
@@ -55,6 +55,10 @@ export function gate(lineDir: string, id: string, opts: { out?: string; noLedger
   const forbid: string[] = (ticket.front.forbid ?? []).filter((f: unknown) => typeof f === 'string' && /[*/]/.test(f));
   const unchecked: string[] = (ticket.front.forbid ?? []).filter((f: unknown) => typeof f === 'string' && !/[*/]/.test(f));
   if (unchecked.length) notes.push(`forbid 里这些不是路径，程序查不了，留给总调度：${unchecked.join('、')}`);
+  const publish = readPublish(ticket.front);
+  notes.push(publish.length
+    ? `这张票允许的发布类动作：${publish.map(p => `${p.repo}（${p.actions.join('、')}）`).join('；')}。每一件仍要用户本人在执行动作的那个会话里点头，程序查不了，留给总调度`
+    : '票头没写 publish：这张票不许做任何发布类动作（建仓库、改可见性、推送、开 PR、发评论、往外传文件）');
   const repos = scopeRepos(lineRepo, ticket.front);
   if (!repos.length) notes.push('票头没有 scope，没查改动范围');
   const outDir = opts.out ? resolve(opts.out) : join(lineRepo, 'out', 'gate');

@@ -2,7 +2,7 @@
 // 约定见 docs/cli.md。
 import { existsSync } from 'node:fs';
 import { clock, formatDuration } from './common.ts';
-import { heldByCurfew, loadConfig, loadState, pickNext, runnerInfo, RUNNER_HINT, TERMINAL } from './queue.ts';
+import { heldByCurfew, isPaused, loadConfig, loadState, pickNext, runnerInfo, RUNNER_HINT, TERMINAL } from './queue.ts';
 import { contractChanged, loadLedger, sectionSha, STATUS_TEXT } from './ticket.ts';
 
 export interface Anomaly { code: string; message: string; owner?: string; session?: string; ticket?: string; item?: string; line?: string; action?: string }
@@ -18,9 +18,11 @@ export function patrol(opts: { ackAfterMin?: number; acceptAfterMin?: number; id
   const info: string[] = [];
   const running = state.items.filter(i => i.state === 'running');
   const queued = state.items.filter(i => i.state === 'queued');
-  const held = heldByCurfew(state, now);
+  const paused = isPaused(state);
+  const held = heldByCurfew(state, now) || paused;
+  if (paused) info.push(`急停中（${clock(state.paused!.at)} 起${state.paused!.note ? `，${state.paused!.note}` : ''}），${queued.length} 项排着等 csa queue resume`);
 
-  if (held && queued.length) info.push(`时间窗已到点，${queued.length} 项排着等 csa queue curfew --clear`);
+  if (heldByCurfew(state, now) && queued.length) info.push(`时间窗已到点，${queued.length} 项排着等 csa queue curfew --clear`);
   if (queued.length && !runner.alive && !held) {
     anomalies.push({ code: 'runner-down', message: `排队里有 ${queued.length} 项，排队程序没在跑`, action: RUNNER_HINT });
   }
@@ -72,12 +74,12 @@ export function patrol(opts: { ackAfterMin?: number; acceptAfterMin?: number; id
       if (entry.status === 'waiting-user') info.push(`票 ${entry.ticket} 等用户定`);
     }
   }
-  return { ok: anomalies.length === 0, at: new Date(now).toISOString(), anomalies, info, queue: { runner_alive: runner.alive, running: running.map(i => i.id), queued: queued.length, held_by_curfew: held } };
+  return { ok: anomalies.length === 0, at: new Date(now).toISOString(), anomalies, info, queue: { runner_alive: runner.alive, running: running.map(i => i.id), queued: queued.length, held_by_curfew: heldByCurfew(state, now), paused } };
 }
 
 export function patrolText(result: ReturnType<typeof patrol>) {
   const head = result.ok ? 'OK' : `有 ${result.anomalies.length} 件事`;
-  const queue = `排队程序${result.queue.runner_alive ? '在跑' : '没在跑'}，正在跑 ${result.queue.running.join('、') || '无'}，排着 ${result.queue.queued} 项${result.queue.held_by_curfew ? '（时间窗到点，停着）' : ''}`;
+  const queue = `排队程序${result.queue.runner_alive ? '在跑' : '没在跑'}，正在跑 ${result.queue.running.join('、') || '无'}，排着 ${result.queue.queued} 项${result.queue.paused ? '（急停中）' : result.queue.held_by_curfew ? '（时间窗到点，停着）' : ''}`;
   return [
     `${head}　${clock(result.at)}　${queue}`,
     ...result.anomalies.map(a => `! ${a.code}：${a.message}${a.action ? `\n  → ${a.action}` : ''}`),

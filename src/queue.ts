@@ -20,7 +20,8 @@ export interface Item {
   evented_at?: string;
 }
 export interface Curfew { no_start_after?: string; kill_at?: string; note?: string }
-export interface QueueState { version: 1; curfew: Curfew | null; items: Item[] }
+export interface Pause { at: string; note?: string }
+export interface QueueState { version: 1; curfew: Curfew | null; paused?: Pause | null; items: Item[] }
 export interface LineConfig { id: string; dir: string; auth?: { file: string; heading: string; sha256: string } }
 export interface Config { views?: string[]; shell?: string; idle_exit_s?: number; lines?: LineConfig[]; on_end?: string; on_end_timeout_s?: number }
 
@@ -28,7 +29,7 @@ export const TERMINAL: ItemState[] = ['done', 'failed', 'killed', 'cancelled', '
 const STATE_TEXT: Record<ItemState, string> = {
   queued: '排队', running: '正在跑', done: '跑完', failed: '出错退出', killed: '被停掉', cancelled: '取消', skipped: '检查没过、跳过', lost: '下落不明',
 };
-const REASON_TEXT: Record<string, string> = { limit: '超过上限', curfew: '时间窗到点', cancel: '有人取消' };
+const REASON_TEXT: Record<string, string> = { limit: '超过上限', curfew: '时间窗到点', cancel: '有人取消', pause: '急停' };
 
 export function paths() {
   const dir = dataDir();
@@ -52,6 +53,9 @@ function curfewTimes(curfew: Curfew | null) {
   return { noStart: curfew?.no_start_after ? Date.parse(curfew.no_start_after) : null, killAt: curfew?.kill_at ? Date.parse(curfew.kill_at) : null };
 }
 
+/** 急停中：不开新作业，在跑的停掉，排队程序照样退出；直到有人 csa queue resume。 */
+export const isPaused = (state: QueueState) => !!state.paused;
+
 export function heldByCurfew(state: QueueState, now = Date.now()) {
   const { noStart, killAt } = curfewTimes(state.curfew);
   return (noStart !== null && now >= noStart) || (killAt !== null && now >= killAt);
@@ -66,7 +70,7 @@ export function pickNext(state: QueueState, now = Date.now()): Item | null {
       Object.assign(item, { state: 'cancelled', end_at: iso(now), reason: `前一项 ${dep.id} 没成功（${STATE_TEXT[dep.state]}）` });
     }
   }
-  if (heldByCurfew(state, now)) return null;
+  if (isPaused(state) || heldByCurfew(state, now)) return null;
   const { killAt } = curfewTimes(state.curfew);
   for (const item of state.items) {
     if (item.state !== 'queued') continue;
@@ -97,7 +101,8 @@ export function renderView(state: QueueState, now = Date.now()) {
     `由 cloud-superagent 的 \`csa queue\` 生成，${new Date(now).toLocaleString('sv-SE')}。改排队只用命令（\`csa queue add / cancel / curfew\`），手改这页会被覆盖。用法见 cloud-superagent 的 \`docs/cli.md\`。`,
     '',
     `- 排队程序：${runner.alive ? `在跑（pid ${runner.pid}，心跳 ${clock(runner.heartbeat_at)}）` : '没在跑'}`,
-    `- 时间窗：${curfew ? [curfew.no_start_after && `${clock(curfew.no_start_after)} 以后不开新作业`, curfew.kill_at && `${clock(curfew.kill_at)} 停掉还在跑的`, heldByCurfew(state, now) && '**已到点，等有人 `csa queue curfew --clear`**', curfew.note].filter(Boolean).join('；') : '无'}`,
+    ...(state.paused ? [`- **急停中**（${clock(state.paused.at, now)} 起${state.paused.note ? `，${state.paused.note}` : ''}）：不开新作业，等有人 \`csa queue resume\``] : []),
+    `- 时间窗：${curfew ? [curfew.no_start_after && `${clock(curfew.no_start_after, now)} 以后不开新作业`, curfew.kill_at && `${clock(curfew.kill_at, now)} 停掉还在跑的`, heldByCurfew(state, now) && '**已到点，等有人 `csa queue curfew --clear`**', curfew.note].filter(Boolean).join('；') : '无'}`,
     '',
     '## 正在跑',
     ...(running.length ? running.map(i => `- ${line(i)}；${clock(i.start_at)} 开，估时 ${formatDuration(i.est_s)}，上限 ${formatDuration(i.limit_s)}`) : queued.some(i => i.checking_at) ? [] : ['- 无']),
@@ -185,28 +190,61 @@ export function ack(id: string, by?: string) {
   });
 }
 
-/** +90s、+5m 这种相对写法给测试和临时用；平常写钟点 06:45（已过的钟点算明天）。 */
-function clockOrRelative(text: string) {
+/**
+ * 时间窗的时刻：钟点 06:45（刚过去 30 分钟以内的按「现在」，更早的算明天）、now、+90s / +5m 这种相对写法、
+ * 或完整的 ISO 时刻。hint 是要打给人看的一行提示。
+ */
+function clockOrRelative(text: string, flag: string, hints: string[]) {
+  if (text === 'now') return new Date();
   if (text.startsWith('+')) return new Date(Date.now() + parseDuration(text.slice(1)) * 1000);
-  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) return new Date(text);
-  return nextClock(text);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) {
+    const at = new Date(text);
+    if (Number.isNaN(at.getTime())) fail(`${flag} 的时刻写法不认识：${text}`);
+    return at;
+  }
+  const { at, justPassed } = nextClock(text);
+  if (justPassed) hints.push(`${flag} ${text} 刚过去，按现在（${clock(at)}）算；要的是明天的 ${text}，写完整时刻（例：${new Date(at.getTime() + 86_400_000).toISOString().slice(0, 10)}T${text}）`);
+  return at;
 }
 
 export function setCurfew(opts: { noStartAfter?: string; killAt?: string; note?: string; clear?: boolean }) {
+  const hints: string[] = [];
+  let curfew: Curfew | null = null;
+  if (!opts.clear) {
+    if (!opts.noStartAfter && !opts.killAt) fail('至少给 --no-start-after 或 --kill-at；解除用 --clear');
+    const noStart = opts.noStartAfter ? clockOrRelative(opts.noStartAfter, '--no-start-after', hints) : undefined;
+    const killAt = opts.killAt ? clockOrRelative(opts.killAt, '--kill-at', hints) : undefined;
+    if (noStart && killAt && killAt.getTime() < noStart.getTime()) fail(`--kill-at（${clock(killAt)}）早于 --no-start-after（${clock(noStart)}）：停掉在跑的时刻不能早于不再开新作业的时刻`);
+    curfew = { no_start_after: noStart?.toISOString(), kill_at: killAt?.toISOString(), note: opts.note };
+  }
   return withLock('queue', () => {
     const state = loadState();
-    if (opts.clear) state.curfew = null;
-    else {
-      if (!opts.noStartAfter && !opts.killAt) fail('至少给 --no-start-after 或 --kill-at；解除用 --clear');
-      state.curfew = {
-        no_start_after: opts.noStartAfter ? clockOrRelative(opts.noStartAfter).toISOString() : undefined,
-        kill_at: opts.killAt ? clockOrRelative(opts.killAt).toISOString() : undefined,
-        note: opts.note,
-      };
-    }
+    state.curfew = curfew;
     writeJson(paths().state, state);
     writeViews(state);
-    return state.curfew;
+    return { curfew: state.curfew, hints };
+  });
+}
+
+/** 急停：在跑的作业停掉（记 killed，原因 pause，不自动重排），排着的都不开，直到 resume。排队程序没在跑也能先设上。 */
+export function pause(note?: string) {
+  return withLock('queue', () => {
+    const state = loadState();
+    state.paused = { at: state.paused?.at ?? iso(), note: note ?? state.paused?.note };
+    writeJson(paths().state, state);
+    writeViews(state);
+    return { paused: state.paused, running: state.items.filter(i => i.state === 'running').map(i => i.id), runner_alive: runnerInfo().alive };
+  });
+}
+
+export function resume() {
+  return withLock('queue', () => {
+    const state = loadState();
+    const was = state.paused ?? null;
+    state.paused = null;
+    writeJson(paths().state, state);
+    writeViews(state);
+    return { was, queued: state.items.filter(i => i.state === 'queued').length, runner_alive: runnerInfo().alive };
   });
 }
 
@@ -222,6 +260,7 @@ export function status() {
     runner: runnerInfo(),
     curfew: state.curfew,
     held_by_curfew: heldByCurfew(state),
+    paused: state.paused ?? null,
     running: state.items.filter(i => i.state === 'running'),
     queued: state.items.filter(i => i.state === 'queued'),
     unacked: state.items.filter(i => TERMINAL.includes(i.state) && !i.acked_at),
@@ -291,7 +330,13 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
       if (current?.phase === 'check') {
         const slot: Slot = current;
         const item = state.items.find(i => i.id === slot.id);
-        if (!item || item.state !== 'queued') {
+        if (item && item.state === 'queued' && isPaused(state) && !slot.exited) {
+          // 急停：检查停掉，作业留在排队里
+          killTree(slot.child.pid!);
+          delete item.checking_at;
+          console.log(`${clock(now)} 急停，停掉 ${item.id} 开跑前的检查，作业留在排队里`);
+          current = null;
+        } else if (!item || item.state !== 'queued') {
           // 检查跑着的时候作业被取消了
           if (!slot.exited) killTree(slot.child.pid!);
           if (item) delete item.checking_at;
@@ -327,6 +372,7 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
         } else if (item && !slot.killedFor) {
           const { killAt } = curfewTimes(state.curfew);
           const why = item.cancel_requested ? 'cancel'
+            : isPaused(state) ? 'pause'
             : (now - Date.parse(item.start_at!)) / 1000 > item.limit_s ? 'limit'
             : killAt !== null && now >= killAt ? 'curfew' : undefined;
           if (why) {
@@ -381,7 +427,7 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
       for (let i = hooks.length - 1; i >= 0; i--) if (hooks[i].exited) hooks.splice(i, 1);
 
       // 时间窗到点后排着的作业不算「有活」：排队程序照样退出，执行机可以睡；解除时间窗后再开排队程序
-      pending = !!current || orphanAlive || hooks.length > 0 || (state.items.some(i => i.state === 'queued') && !heldByCurfew(state, now));
+      pending = !!current || orphanAlive || hooks.length > 0 || (state.items.some(i => i.state === 'queued') && !heldByCurfew(state, now) && !isPaused(state));
       writeJson(paths().state, state);
       writeViews(state);
     });
