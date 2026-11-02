@@ -38,7 +38,7 @@ export function patrol(opts: { ackAfterMin?: number; acceptAfterMin?: number; id
     }
   }
   for (const item of state.items) {
-    if (!TERMINAL.includes(item.state) || item.acked_at || item.state === 'cancelled') continue;
+    if (!TERMINAL.includes(item.state) || item.acked_at || item.state === 'cancelled' || item.state === 'skipped') continue;
     const age = now - Date.parse(item.end_at ?? item.enq_at);
     if (age >= ackAfter) {
       anomalies.push({

@@ -147,3 +147,15 @@ CSA_PRIVATE_TERMS=<仓库以外的词表文件> scripts/check-private.sh
 4. 同一账号发的评论也能收到；收不到的话，换一个专用的机器账号发，再测一轮。
 
 有一条不过，就照实记下来，维持现状（选项 C）。
+
+## 7. 第二期进度（2026-11-02，暂停时写）
+
+总调度定的：6.1 A、6.2 A + C、6.3 A、6.4 A，判法照第 6 节草稿；6.5 只在实测后做。次序 6.2 → 6.1 → 6.3 → 6.4。推送、建仓库、发评论都要用户本人点头。
+
+- 分支 `phase2`，只在本地提交，没推。
+- **6.2 已完成**：`csa queue config --on-end "<命令>" [--on-end-timeout 30s] | --clear-on-end`；每个终态往 `<数据目录>/events.jsonl` 写一行，写过的标 `evented_at`；钩子和排队并行跑，到时限停掉，失败只记日志。判法 Q14、Q15、Q16、Q17 都过。
+- **6.3 已完成**：`csa queue add --if "<检查>" [--if-timeout 60s]`；检查在排队程序里异步跑，不占锁；不过或超时就记 `skipped`；依赖它的作业取消；patrol 不报 `skipped`。判法 Q18、Q19、Q20 都过。
+- 容器里 `npm test`：46 项全过（39 + Q14–Q20 共 7 项）；typecheck 过。
+- **还没做**：6.1 `csa ticket show`（T7–T9），6.4 `--prepare`（T10–T13）；文档 `docs/cli.md` 还没写新参数。
+- 接着做的人：先读第 6 节的判法，再看 `src/queue.ts` 的 `runLoop`（Slot / Hook 两个结构）。
+- 暂停原因：用户的电脑要离线，总调度叫全部子任务暂停。暂停期间不经 winhand 碰电脑。

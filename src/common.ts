@@ -181,11 +181,11 @@ function hasPwsh() {
 }
 
 /** 起子进程，输出接到日志文件。POSIX 下单独成组，好整组停掉。 */
-export function startLogged(command: string, cwd: string, log: string, shell?: string): ChildProcess {
+export function startLogged(command: string, cwd: string, log: string, shell?: string, env?: Record<string, string>): ChildProcess {
   mkdirSync(dirname(log), { recursive: true });
   const fd = openSync(log, 'a');
   const { file, args } = shellArgs(command, shell);
-  const child = spawn(file, args, { cwd, stdio: ['ignore', fd, fd], windowsHide: true, detached: !isWin });
+  const child = spawn(file, args, { cwd, stdio: ['ignore', fd, fd], windowsHide: true, detached: !isWin, ...(env ? { env: { ...process.env, ...env } } : {}) });
   closeSync(fd);
   return child;
 }

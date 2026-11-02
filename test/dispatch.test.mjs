@@ -25,8 +25,8 @@ const board = (data, args, cwd = repo, env = { CSA_DATA_DIR: data }) => {
   const r = spawnSync(process.execPath, [csa, ...args], { cwd, encoding: 'utf8', env: { ...process.env, CSA_DATA_DIR: undefined, ...env } });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 };
-const runner = (data, extra = []) => new Promise(done => {
-  const child = spawn(process.execPath, [csa, 'queue', 'run', '--idle-exit', '1', '--tick', '150', ...extra], { cwd: repo, env: { ...process.env, CSA_DATA_DIR: data } });
+const runner = (data, extra = [], env = {}) => new Promise(done => {
+  const child = spawn(process.execPath, [csa, 'queue', 'run', '--idle-exit', '1', '--tick', '150', ...extra], { cwd: repo, env: { ...process.env, CSA_DATA_DIR: data, ...env } });
   let out = '';
   child.stdout.on('data', d => { out += d; });
   child.stderr.on('data', d => { out += d; });
@@ -229,6 +229,83 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   check('C4 不认识的子命令：退出码 1，只打一行说明，不打堆栈', bad.code === 1 && bad.out.includes('不认识') && !bad.out.includes('    at '), bad.out);
   const small = board(freshData(), ['queue', 'add', '--owner', 'X', '--est', '10m', '--limit', '1m', '--', node('0')]);
   check('C5 --limit 比 --est 小的作业不让排', small.code === 1 && small.out.includes('--limit'), small.out);
+}
+
+// ---------- 第二期：作业结束钩子和 events.jsonl（6.2），开跑前的检查 --if（6.3） ----------
+const hookDir = freshData();
+const hookScript = join(hookDir, 'hook.mjs');
+write(hookScript, `import { appendFileSync } from 'node:fs';
+appendFileSync(process.argv[2], JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('CSA_JOB_') || k === 'SECRET_PROBE'))) + '\\n');
+if (process.argv[3] === 'fail') process.exit(5);
+if (process.argv[3] === 'sleep') setTimeout(() => {}, 60000);
+`);
+const hookCmd = (out, mode = '') => `node "${hookScript}" "${out}"${mode ? ` ${mode}` : ''}`;
+const hookLines = out => existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
+const eventLines = d => existsSync(join(d, 'events.jsonl')) ? readFileSync(join(d, 'events.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
+{
+  const d = freshData();
+  const out = join(hookDir, 'q14.txt');
+  board(d, ['queue', 'config', '--on-end', hookCmd(out)]);
+  board(d, ['queue', 'add', '--owner', 'A', '--session', 'sess-a', '--ticket', '7', '--est', '1s', '--', node('0')]);
+  board(d, ['queue', 'add', '--owner', 'B', '--est', '1s', '--', node('process.exit(2)')]);
+  await runner(d);
+  const lines = hookLines(out);
+  const ok = lines.length === 2 && ['A', 'B'].every(owner => {
+    const it = item(d, owner), h = lines.find(l => l.CSA_JOB_ID === it.id);
+    return h && h.CSA_JOB_STATE === it.state && h.CSA_JOB_RC === String(it.rc) && h.CSA_JOB_OWNER === owner;
+  }) && lines.find(l => l.CSA_JOB_OWNER === 'A')?.CSA_JOB_SESSION === 'sess-a' && lines.find(l => l.CSA_JOB_OWNER === 'A')?.CSA_JOB_TICKET === '7';
+  check('Q14 结束钩子每个作业跑一次，拿到的 CSA_JOB_ID / STATE / RC 和 queue.json 一致', ok, JSON.stringify(lines));
+  const before = eventLines(d).length;
+  board(d, ['queue', 'add', '--owner', 'C', '--est', '1s', '--', node('0')]);
+  await runner(d);
+  const ev = eventLines(d);
+  check('Q17 events.jsonl 每个终态一行；排队程序重启后不重写已经写过的（钩子也不重跑）',
+    before === 2 && ev.length === 3 && new Set(ev.map(e => e.id)).size === 3 && hookLines(out).length === 3 && ev.every(e => e.state && 'rc' in e && !('stdout' in e)), JSON.stringify(ev));
+}
+{
+  const gap = d => Date.parse(item(d, 'B').start_at) - Date.parse(item(d, 'A').end_at);
+  const d1 = freshData();
+  board(d1, ['queue', 'config', '--on-end', hookCmd(join(hookDir, 'q15a.txt'), 'fail')]);
+  board(d1, ['queue', 'add', '--owner', 'A', '--est', '1s', '--', node('0')]);
+  board(d1, ['queue', 'add', '--owner', 'B', '--est', '1s', '--', node('0')]);
+  const r1 = await runner(d1);
+  const d2 = freshData();
+  board(d2, ['queue', 'config', '--on-end', hookCmd(join(hookDir, 'q15b.txt'), 'sleep'), '--on-end-timeout', '2s']);
+  board(d2, ['queue', 'add', '--owner', 'A', '--est', '1s', '--', node('0')]);
+  board(d2, ['queue', 'add', '--owner', 'B', '--est', '1s', '--', node('0')]);
+  const started = Date.now();
+  const r2 = await runner(d2);
+  check('Q15 钩子退出码非零、或睡 60 秒被时限停掉，下一个作业照常开（不晚于前一个结束后 2 跳）',
+    item(d1, 'B').state === 'done' && gap(d1) <= 300 && r1.out.includes('退出码 5')
+      && item(d2, 'B').state === 'done' && gap(d2) <= 300 && r2.out.includes('停掉') && Date.now() - started < 30000,
+    `${gap(d1)} ${gap(d2)}\n${r1.out}\n${r2.out}`);
+}
+{
+  const d = freshData();
+  const out = join(hookDir, 'q16.txt');
+  const probe = `probe${Math.random().toString(36).slice(2)}`;
+  board(d, ['queue', 'config', '--on-end', hookCmd(out)]);
+  board(d, ['queue', 'add', '--owner', 'A', '--est', '1s', '--', node(`console.log('${probe}')`)]);
+  await runner(d);
+  const text = existsSync(out) ? readFileSync(out, 'utf8') : '';
+  check('Q16 钩子的环境里没有作业输出', readFileSync(item(d, 'A').log, 'utf8').includes(probe) && text.includes('CSA_JOB_ID') && !text.includes(probe), text);
+}
+{
+  const d = freshData();
+  const skipped = JSON.parse(board(d, ['queue', 'add', '--owner', 'S', '--est', '1s', '--json', '--if', node('process.exit(1)'), '--', node("console.log('should not run')")]).out).id;
+  board(d, ['queue', 'add', '--owner', 'N', '--est', '1s', '--', node('0')]);
+  board(d, ['queue', 'add', '--owner', 'D', '--est', '1s', '--after', skipped, '--', node('0')]);
+  board(d, ['queue', 'add', '--owner', 'T', '--est', '1s', '--if', node('setTimeout(()=>{},60000)'), '--if-timeout', '2s', '--', node('0')]);
+  const started = Date.now();
+  await runner(d);
+  const s = item(d, 'S');
+  check('Q18 --if 返回 1 的作业记 skipped（命令没跑），排在后面的作业照开', s.state === 'skipped' && s.reason.includes('rc 1') && !readFileSync(s.log, 'utf8').includes('should not run') && item(d, 'N').state === 'done', JSON.stringify(state(d).items.map(i => [i.owner, i.state, i.reason])));
+  check('Q19 --after 一个 skipped 的作业，记 cancelled，原因写明前一项被跳过', item(d, 'D').state === 'cancelled' && item(d, 'D').reason.includes('跳过'), JSON.stringify(item(d, 'D')));
+  const p = board(d, ['patrol', '--json', '--ack-after', '0']);
+  const t = item(d, 'T');
+  check('Q20 --if 超过时限被停，记 skipped、原因写超时；csa patrol 不把 skipped 当 finished-unacked',
+    t.state === 'skipped' && t.reason.includes('超时') && Date.now() - started < 30000
+      && !JSON.parse(p.out).anomalies.some(a => a.code === 'finished-unacked' && (a.item === t.id || a.item === s.id)), `${JSON.stringify(t)}\n${p.out}`);
 }
 
 console.log(failed ? `\n${failed} 项没过` : '\n全部通过');
