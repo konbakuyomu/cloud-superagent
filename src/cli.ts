@@ -3,11 +3,11 @@ import { parseArgs } from 'node:util';
 import { CliError, fail, joinCommand, parseDuration } from './common.ts';
 import { gate } from './gate.ts';
 import { patrol, patrolText } from './patrol.ts';
-import { ack, add, cancel, loadConfig, logTail, pause, renderView, loadState, resume, RUNNER_HINT, runLoop, saveConfig, setCurfew, status } from './queue.ts';
+import { ack, add, cancel, loadConfig, logTail, markOldEvented, pause, renderView, loadState, resume, RUNNER_HINT, runLoop, saveConfig, setCurfew, status } from './queue.ts';
 import { amend, dispatch, init, loadLedger, resolveLineDir, setStatus, show, showText, STATUS_TEXT } from './ticket.ts';
 
 export const USAGE = [
-  '  csa queue add --owner <会话> --est 12m [--limit 40m] [--ticket 50] [--session <id>] [--note "<说明>"] [--after <作业 id>] [--cwd <目录>] [--if "<开跑前的检查>" [--if-timeout 60s]] -- "<整行命令>"',
+  '  csa queue add --owner <会话> --est 12m [--limit 40m] [--ticket 50 --line <线>] [--session <id>] [--note "<说明>"] [--after <作业 id>] [--cwd <目录>] [--if "<开跑前的检查>" [--if-timeout 60s]] -- "<整行命令>"',
   '  csa queue list | status [--json] | log <作业 id> [--lines 40] | ack <作业 id> [--by <会话>] | cancel <作业 id>',
   '  csa queue curfew --no-start-after 06:45|now|+30m --kill-at 06:50 [--note "<出处>"] | --clear',
   '  csa queue pause [--note "<为什么>"] | resume     急停（停掉在跑的、不开新的）和恢复',
@@ -65,7 +65,7 @@ async function queueCli(argv: string[]) {
   const { values: o, positionals } = parseArgs({
     args: argv, allowPositionals: true,
     options: {
-      owner: { type: 'string' }, session: { type: 'string' }, ticket: { type: 'string' }, note: { type: 'string' },
+      owner: { type: 'string' }, session: { type: 'string' }, ticket: { type: 'string' }, line: { type: 'string' }, note: { type: 'string' },
       est: { type: 'string' }, limit: { type: 'string' }, after: { type: 'string' }, cwd: { type: 'string' }, shell: { type: 'string' },
       cmd: { type: 'string' }, json: { type: 'boolean' }, 'idle-exit': { type: 'string' }, tick: { type: 'string' },
       'no-start-after': { type: 'string' }, 'kill-at': { type: 'string' }, clear: { type: 'boolean' }, by: { type: 'string' },
@@ -76,7 +76,7 @@ async function queueCli(argv: string[]) {
   const [action, ...rest] = positionals;
   if (action === 'add') {
     const shell = o.shell ?? loadConfig().shell;
-    const r = add({ owner: o.owner!, session: o.session, ticket: o.ticket, note: o.note, est: o.est!, limit: o.limit, after: o.after, cwd: o.cwd, shell, cmd: o.cmd ?? joinCommand(rest, shell), if: o.if, ifTimeout: o['if-timeout'] });
+    const r = add({ owner: o.owner!, session: o.session, ticket: o.ticket, line: o.line, note: o.note, est: o.est!, limit: o.limit, after: o.after, cwd: o.cwd, shell, cmd: o.cmd ?? joinCommand(rest, shell), if: o.if, ifTimeout: o['if-timeout'] });
     print(r, o.json, () => [
       `排上了 ${r.id}：排队第 ${r.position} 位${r.running ? '（前面有作业在跑）' : ''}，日志 ${r.log}`,
       r.runner_alive ? '排队程序在跑，轮到就自动开' : RUNNER_HINT,
@@ -111,6 +111,7 @@ async function queueCli(argv: string[]) {
     if (o['add-view']) config.views = [...new Set([...(config.views ?? []), o['add-view']])];
     if (o['remove-view']) config.views = (config.views ?? []).filter(v => v !== o['remove-view']);
     if (o.shell) config.shell = o.shell;
+    if (o['on-end'] && !config.on_end) console.log(`第一次配结束钩子：已经结束的 ${markOldEvented()} 项作业不补写事件、不补跑钩子`);
     if (o['on-end']) config.on_end = o['on-end'];
     if (o['on-end-timeout']) config.on_end_timeout_s = parseDuration(o['on-end-timeout']);
     if (o['clear-on-end']) { delete config.on_end; delete config.on_end_timeout_s; }

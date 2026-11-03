@@ -21,7 +21,7 @@
 2. **重作业只经排队。** 跑几分钟以上、会和别人抢执行机的活，一律：
 
    ```
-   csa queue add --owner <你的代号> --session <你的会话 id> --ticket <票> --est <估时> --limit <上限> -- "<整行命令>"
+   csa queue add --owner <你的代号> --session <你的会话 id> --ticket <票> --line <线> --est <估时> --limit <上限> -- "<整行命令>"
    ```
 
    - 命令带引号或好几段时，先写成脚本文件（`.ps1` 或 `.sh`），再排 `-- pwsh -NoProfile -File <脚本>` 或 `-- bash <脚本>`。

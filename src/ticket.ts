@@ -196,6 +196,11 @@ export function prepareWorktrees(lineRepo: string, front: Record<string, any>) {
       if (current !== branch) fail(`${repo.key}：${target} 是 worktree，但在分支 ${current}，票要的是 ${branch}`);
       plans.push({ key: repo.key, source, target, branch, base, exists: true, branchExists: true });
     } else {
+      // 分支已经在别的 worktree（包括源仓库自己）里检出：git worktree add 会失败，先查出来
+      const listed = git(source, ['worktree', 'list', '--porcelain']).out.split(/\r?\n\r?\n/);
+      const holder = listed.find(block => block.split(/\r?\n/).includes(`branch refs/heads/${branch}`));
+      if (holder) fail(`${repo.key}：分支 ${branch} 已经在 ${holder.split(/\r?\n/)[0].replace(/^worktree /, '')} 检出，不能再建一个 worktree；改票头的 path 指向它，或换一个分支名`);
+      if (plans.some(p => p.source === source && p.branch === branch)) fail(`${repo.key}：票头里有两个仓库要在 ${source} 检出同一个分支 ${branch}`);
       const branchExists = git(source, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).ok;
       if (!branchExists && !git(source, ['rev-parse', '--verify', '--quiet', base]).ok) fail(`${repo.key}：基准分支 ${base} 不存在`);
       plans.push({ key: repo.key, source, target, branch, base, exists: false, branchExists });
@@ -207,7 +212,8 @@ export function prepareWorktrees(lineRepo: string, front: Record<string, any>) {
       const r = plan.branchExists
         ? git(plan.source, ['worktree', 'add', plan.target, plan.branch])
         : git(plan.source, ['worktree', 'add', '-b', plan.branch, plan.target, plan.base]);
-      if (!r.ok) fail(`${plan.key}：git worktree add 失败：${r.err}`);
+      const made = Object.entries(prepared).filter(([k]) => plans.find(p => p.key === k && !p.exists)).map(([k, v]) => `${k} ${v}`);
+      if (!r.ok) fail(`${plan.key}：git worktree add 失败：${r.err}${made.length ? `。这次已经建好的：${made.join('、')}（留着；修好以后再派一次会直接用它们，不会重建）` : ''}；台账没记这次派单`);
     }
     prepared[plan.key] = plan.target;
   }
@@ -303,8 +309,10 @@ export const NEXT_TEXT: Record<Status, string> = {
  * 一张票的卡片：台账一条 + 这张票的排队作业 + gate 结论 + 各仓库派单时和现在的提交 + run log + 下一跳。
  * 纯读：不写任何文件，不碰锁。
  */
-export function show(lineDir: string, id: string, queueItems: { id: string; ticket?: string; state: string; rc?: number | null; log: string; acked_at?: string; owner: string }[]) {
-  const entry = loadLedger(lineDir).tickets[id] ?? fail(`台账里没有票 ${id}：先 csa ticket dispatch ${id}`);
+export function show(lineDir: string, id: string, queueItems: { id: string; ticket?: string; line?: string; state: string; rc?: number | null; log: string; acked_at?: string; owner: string }[]) {
+  const ledgerAll = loadLedger(lineDir);
+  const lineId = (loadConfig().lines ?? []).find(l => inside(l.dir, lineDir) === '')?.id ?? ledgerAll.line;
+  const entry = ledgerAll.tickets[id] ?? fail(`台账里没有票 ${id}：先 csa ticket dispatch ${id}`);
   const file = join(lineDir, entry.file);
   const front = existsSync(file) ? readTicket(file).front : {};
   const lineRepo = repoRoot(lineDir);
@@ -314,8 +322,9 @@ export function show(lineDir: string, id: string, queueItems: { id: string; tick
     heads[repo.key] = { dispatched: entry.heads[repo.key] ?? null, now: head?.ok ? head.out : null };
   }
   for (const key of Object.keys(entry.heads)) heads[key] ??= { dispatched: entry.heads[key], now: null };
-  const jobs = queueItems.filter(i => i.ticket === id)
-    .map(i => ({ id: i.id, owner: i.owner, state: i.state, rc: i.rc ?? null, acked: !!i.acked_at, log: i.log }));
+  // 同号的票在不同的线上：排作业时写了 --line 的按线分开；没写的只能按票号认，标 line_unknown
+  const jobs = queueItems.filter(i => i.ticket === id && (!i.line || i.line === lineId))
+    .map(i => ({ id: i.id, owner: i.owner, state: i.state, rc: i.rc ?? null, acked: !!i.acked_at, log: i.log, ...(i.line ? {} : { line_unknown: true }) }));
   const gate = entry.gate ? { verdict: entry.gate.verdict, at: entry.gate.at, file: entry.gate.file, md: entry.gate.file.replace(/\.json$/, '.md') } : null;
   let runLog: string | null = null;
   if (typeof front.run_log === 'string') runLog = isAbsolute(front.run_log) ? front.run_log : join(lineRepo, front.run_log);

@@ -15,7 +15,11 @@ export interface Item {
   state: ItemState; enq_at: string; start_at?: string; end_at?: string;
   pid?: number; rc?: number | null; reason?: string; log: string; acked_at?: string; cancel_requested?: boolean;
   /** 开跑前的检查命令（--if）和它的时限；检查不过记 skipped。 */
-  if_cmd?: string; if_timeout_s?: number; checking_at?: string;
+  if_cmd?: string; if_timeout_s?: number; checking_at?: string; checking_pid?: number;
+  /** 线的 id（csa queue add --line）：同号的票在不同的线上，靠它分开。 */
+  line?: string;
+  /** 接手的遗留作业已经被要求停掉的原因（pause / cancel / limit / curfew）。 */
+  kill_sent?: string;
   /** 结束事件已经写进 events.jsonl（和跑过钩子）的时刻；有它就不再写。 */
   evented_at?: string;
 }
@@ -61,6 +65,13 @@ export function heldByCurfew(state: QueueState, now = Date.now()) {
   return (noStart !== null && now >= noStart) || (killAt !== null && now >= killAt);
 }
 
+/** 现在能不能开这一项：急停、时间窗到点、估时放不进时间窗，都不能开。pickNext 和「检查过了要开跑」都用它。 */
+export function admissible(state: QueueState, item: Item, now = Date.now()) {
+  if (isPaused(state) || heldByCurfew(state, now)) return false;
+  const { killAt } = curfewTimes(state.curfew);
+  return !(killAt !== null && now + item.est_s * 1000 > killAt);
+}
+
 /** 依赖没成功的作业直接取消；返回下一项能开的作业（先来先跑，时间窗里放不下的跳过，看后面短的）。 */
 export function pickNext(state: QueueState, now = Date.now()): Item | null {
   for (const item of state.items) {
@@ -78,7 +89,7 @@ export function pickNext(state: QueueState, now = Date.now()): Item | null {
       const dep = state.items.find(i => i.id === item.after);
       if (dep && dep.state !== 'done') continue;
     }
-    if (killAt !== null && now + item.est_s * 1000 > killAt) continue;
+    if (!admissible(state, item, now)) continue;
     return item;
   }
   return null;
@@ -135,7 +146,7 @@ function newId(state: QueueState, owner: string, ticket?: string) {
   return id;
 }
 
-export interface AddOptions { owner: string; session?: string; ticket?: string; note?: string; est: string; limit?: string; after?: string; cwd?: string; shell?: string; cmd: string; if?: string; ifTimeout?: string }
+export interface AddOptions { owner: string; session?: string; ticket?: string; line?: string; note?: string; est: string; limit?: string; after?: string; cwd?: string; shell?: string; cmd: string; if?: string; ifTimeout?: string }
 
 export function add(opts: AddOptions) {
   if (!opts.owner) fail('缺少 --owner（哪个会话负责，例：B）');
@@ -150,7 +161,7 @@ export function add(opts: AddOptions) {
     if (opts.after && !state.items.some(i => i.id === opts.after)) fail(`--after 的作业不存在：${opts.after}`);
     const id = newId(state, opts.owner, opts.ticket);
     const item: Item = {
-      id, owner: opts.owner, session: opts.session, ticket: opts.ticket, note: opts.note, cmd: opts.cmd, cwd,
+      id, owner: opts.owner, session: opts.session, ticket: opts.ticket, line: opts.line, note: opts.note, cmd: opts.cmd, cwd,
       shell: opts.shell ?? loadConfig().shell, est_s: est, limit_s: limit, after: opts.after,
       state: 'queued', enq_at: iso(), log: join(paths().logs, `${id}.log`),
       ...(opts.if?.trim() ? { if_cmd: opts.if, if_timeout_s: parseDuration(opts.ifTimeout, 60) } : {}),
@@ -161,6 +172,23 @@ export function add(opts: AddOptions) {
     const position = state.items.filter(i => i.state === 'queued').indexOf(item) + 1;
     const running = state.items.filter(i => i.state === 'running').length;
     return { id, position, running, runner_alive: runnerInfo().alive, log: item.log };
+  });
+}
+
+/**
+ * 第一次配结束钩子时调用：已经结束、还没写过结束事件的作业，记成「开钩子以前就结束了」，不补写事件、不补跑钩子。
+ * 否则老作业会在下一跳一起触发钩子。返回记了几项。
+ */
+export function markOldEvented() {
+  return withLock('queue', () => {
+    const state = loadState();
+    const at = iso();
+    let n = 0;
+    for (const item of state.items) {
+      if (TERMINAL.includes(item.state) && !item.evented_at) { item.evented_at = at; n++; }
+    }
+    writeJson(paths().state, state);
+    return n;
   });
 }
 
@@ -203,7 +231,13 @@ function clockOrRelative(text: string, flag: string, hints: string[]) {
     return at;
   }
   const { at, justPassed } = nextClock(text);
-  if (justPassed) hints.push(`${flag} ${text} 刚过去，按现在（${clock(at)}）算；要的是明天的 ${text}，写完整时刻（例：${new Date(at.getTime() + 86_400_000).toISOString().slice(0, 10)}T${text}）`);
+  if (justPassed) {
+    const tomorrow = new Date(at);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const ymd = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+    const hhmm = text.split(':').map(x => x.padStart(2, '0')).join(':');
+    hints.push(`${flag} ${text} 刚过去，按现在（${clock(at)}）算；要的是明天的 ${text}，写完整时刻（例：${ymd}T${hhmm}）`);
+  }
   return at;
 }
 
@@ -284,20 +318,30 @@ function spawnSlot(id: string, phase: Slot['phase'], cmd: string, item: Item): S
 
 /** 结束事件：只给固定字段，不带作业输出。 */
 export function endEvent(item: Item) {
-  return { at: item.end_at ?? iso(), id: item.id, state: item.state, rc: item.rc ?? null, reason: item.reason ?? null, owner: item.owner, session: item.session ?? null, ticket: item.ticket ?? null, log: item.log };
+  return { event_id: `${item.id}:${item.state}`, at: item.end_at ?? iso(), id: item.id, state: item.state, rc: item.rc ?? null, reason: item.reason ?? null, owner: item.owner, session: item.session ?? null, ticket: item.ticket ?? null, log: item.log };
 }
 
 /** 钩子拿到的环境变量：固定这几个，值都来自排队记录。 */
 export function hookEnv(item: Item): Record<string, string> {
   const e = endEvent(item);
   return {
-    CSA_JOB_ID: e.id, CSA_JOB_STATE: e.state, CSA_JOB_RC: e.rc === null ? '' : String(e.rc), CSA_JOB_REASON: e.reason ?? '',
+    CSA_EVENT_ID: e.event_id, CSA_JOB_ID: e.id, CSA_JOB_STATE: e.state, CSA_JOB_RC: e.rc === null ? '' : String(e.rc), CSA_JOB_REASON: e.reason ?? '',
     CSA_JOB_OWNER: e.owner, CSA_JOB_SESSION: e.session ?? '', CSA_JOB_TICKET: e.ticket ?? '', CSA_JOB_LOG: e.log,
   };
 }
 
-function tailOf(file: string, lines = 5) {
-  try { return readFileSync(file, 'utf8').trimEnd().split(/\r?\n/).slice(-lines).join(' ⏎ '); } catch { return ''; }
+/** 结束钩子最多同时跑几个。 */
+const HOOK_PARALLEL = 2;
+
+/** events.jsonl 里已经写过的 event_id（排队程序起来时读一次）。 */
+function loadEventIds() {
+  const ids = new Set<string>();
+  if (!existsSync(paths().events)) return ids;
+  for (const line of readFileSync(paths().events, 'utf8').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { const e = JSON.parse(line); ids.add(e.event_id ?? `${e.id}:${e.state}`); } catch { /* 半行：写到一半崩了，跳过 */ }
+  }
+  return ids;
 }
 
 /** 排队程序本体：单例；一次只跑一个；排队清空、钩子也都结束 idleExit 秒后退出。 */
@@ -316,6 +360,8 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
   console.log(`排队程序开始（pid ${me}），排队清空 ${idleExit} 秒后退出`);
   let current: Slot | null = null;
   const hooks: Hook[] = [];
+  const hookQueue: { item: Item; command: string; shell?: string; timeout_s: number }[] = [];
+  const seenEvents = loadEventIds();
   let idleSince = Date.now();
   for (;;) {
     let pending = false;
@@ -334,21 +380,28 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
           // 急停：检查停掉，作业留在排队里
           killTree(slot.child.pid!);
           delete item.checking_at;
+          delete item.checking_pid;
           console.log(`${clock(now)} 急停，停掉 ${item.id} 开跑前的检查，作业留在排队里`);
           current = null;
         } else if (!item || item.state !== 'queued') {
           // 检查跑着的时候作业被取消了
           if (!slot.exited) killTree(slot.child.pid!);
-          if (item) delete item.checking_at;
+          if (item) { delete item.checking_at; delete item.checking_pid; }
           current = null;
         } else if (slot.exited) {
           delete item.checking_at;
-          if (slot.exited.code === 0 && !slot.timedOut) {
+          delete item.checking_pid;
+          if (slot.exited.code === 0 && !slot.timedOut && !admissible(state, item, now)) {
+            // 检查跑着的时候急停了、时间窗到点了、或者剩的时间放不下了：作业留在排队里，以后重新检查
+            console.log(`${clock(now)} ${item.id} 检查过了，但现在不能开（急停或时间窗），留在排队里`);
+            current = null;
+          } else if (slot.exited.code === 0 && !slot.timedOut) {
             current = spawnSlot(item.id, 'job', item.cmd, item);
             Object.assign(item, { state: 'running', start_at: iso(now), pid: current.child.pid });
             console.log(`${clock(now)} ${item.id} 检查过了，开跑`);
           } else {
-            const why = slot.timedOut ? `开跑前的检查超时（${item.if_timeout_s} s），跳过` : `开跑前的检查没过（rc ${slot.exited.code}）：${tailOf(item.log)}`;
+            // 原因只写结构化的事实，检查的输出留在作业日志里：原因会进 events.jsonl 和钩子的环境
+            const why = slot.timedOut ? `开跑前的检查超时（${item.if_timeout_s} s），跳过` : `开跑前的检查没过（rc ${slot.exited.code}），输出见作业日志`;
             Object.assign(item, { state: 'skipped', end_at: iso(now), rc: null, reason: why });
             console.log(`${clock(now)} ${item.id} 跳过：${why}`);
             current = null;
@@ -382,19 +435,40 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
           }
         }
       }
-      // 上一个排队程序留下的「正在跑」：进程还在就等它，不在了记「下落不明」；留下的「在检查」重新排
+      // 上一个排队程序留下的：
+      // - 「在检查」：检查进程还在就停掉，作业留在排队里重新检查（检查本来就该是只读、可以重跑的）；
+      // - 「正在跑」：进程还在就接着管，急停、取消、超上限、时间窗到点照样停掉；进程不在了，停过的记 killed，没停过的记「下落不明」。
       let orphanAlive = false;
+      const { killAt: orphanKillAt } = curfewTimes(state.curfew);
       for (const item of state.items) {
-        if (item.state === 'queued' && item.checking_at && item.id !== current?.id) delete item.checking_at;
+        if (item.state === 'queued' && item.checking_at && item.id !== current?.id) {
+          if (pidAlive(item.checking_pid)) killTree(item.checking_pid!);
+          delete item.checking_at;
+          delete item.checking_pid;
+        }
         if (item.state !== 'running' || item.id === current?.id) continue;
-        if (pidAlive(item.pid)) orphanAlive = true;
-        else Object.assign(item, { state: 'lost', end_at: iso(now), rc: null, reason: '排队程序重启前就在跑，退出码不明' });
+        if (pidAlive(item.pid)) {
+          orphanAlive = true;
+          const why = item.cancel_requested ? 'cancel'
+            : isPaused(state) ? 'pause'
+            : (now - Date.parse(item.start_at!)) / 1000 > item.limit_s ? 'limit'
+            : orphanKillAt !== null && now >= orphanKillAt ? 'curfew' : undefined;
+          if (why && !item.kill_sent) {
+            item.kill_sent = why;
+            console.log(`${clock(now)} 停掉接手的 ${item.id}（${REASON_TEXT[why]}）`);
+            killTree(item.pid!);
+          }
+        } else if (item.kill_sent) {
+          Object.assign(item, { state: 'killed', end_at: iso(now), rc: null, reason: item.kill_sent });
+          delete item.kill_sent;
+        } else Object.assign(item, { state: 'lost', end_at: iso(now), rc: null, reason: '排队程序重启前就在跑，退出码不明' });
       }
       if (!current && !orphanAlive) {
         const next = pickNext(state, now);
         if (next?.if_cmd) {
           current = spawnSlot(next.id, 'check', next.if_cmd, next);
           next.checking_at = iso(now);
+          next.checking_pid = current.child.pid;
           console.log(`${clock(now)} ${next.id} 先跑开跑前的检查`);
         } else if (next) {
           current = spawnSlot(next.id, 'job', next.cmd, next);
@@ -403,19 +477,27 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
         }
       }
 
-      // 结束事件：每个终态写一行 events.jsonl，配了 on_end 再起一次钩子；写过的记 evented_at，重启也不重写
+      // 结束事件：每个终态写一行 events.jsonl（带 event_id = 作业 id:状态），写进去了才记 evented_at；
+      // 写不进就下一跳再写。events.jsonl 里已经有的 event_id 不再写、不再起钩子（防「写进去了、状态还没落盘就崩了」重复）。
       for (const item of state.items) {
         if (!TERMINAL.includes(item.state) || item.evented_at) continue;
-        item.evented_at = iso(now);
-        try { appendFileSync(paths().events, `${JSON.stringify(endEvent(item))}\n`); } catch (error: any) { console.error(`events.jsonl 写不进：${error.message}`); }
-        if (config.on_end) {
-          mkdirSync(paths().logs, { recursive: true });
-          const child = startLogged(config.on_end, paths().dir, join(paths().logs, 'hooks.log'), config.shell, hookEnv(item));
-          const hook: Hook = { id: item.id, child, started: now, timeout_s: config.on_end_timeout_s ?? 30, exited: false };
-          child.on('exit', code => { hook.exited = true; if (code !== 0 && !hook.killed) console.error(`${item.id} 的结束钩子退出码 ${code}`); });
-          child.on('error', error => { hook.exited = true; console.error(`${item.id} 的结束钩子起不来：${error.message}`); });
-          hooks.push(hook);
+        const event = endEvent(item);
+        if (!seenEvents.has(event.event_id)) {
+          try { appendFileSync(paths().events, `${JSON.stringify(event)}\n`); } catch (error: any) { console.error(`events.jsonl 写不进，下一跳再写：${error.message}`); continue; }
+          seenEvents.add(event.event_id);
+          if (config.on_end) hookQueue.push({ item: { ...item }, command: config.on_end, shell: config.shell, timeout_s: config.on_end_timeout_s ?? 30 });
         }
+        item.evented_at = iso(now);
+      }
+      // 钩子最多同时跑 HOOK_PARALLEL 个，其余排着
+      while (hookQueue.length && hooks.filter(h => !h.exited).length < HOOK_PARALLEL) {
+        const job = hookQueue.shift()!;
+        mkdirSync(paths().logs, { recursive: true });
+        const child = startLogged(job.command, paths().dir, join(paths().logs, 'hooks.log'), job.shell, hookEnv(job.item));
+        const hook: Hook = { id: job.item.id, child, started: now, timeout_s: job.timeout_s, exited: false };
+        child.on('exit', code => { hook.exited = true; if (code !== 0 && !hook.killed) console.error(`${job.item.id} 的结束钩子退出码 ${code}`); });
+        child.on('error', error => { hook.exited = true; console.error(`${job.item.id} 的结束钩子起不来：${error.message}`); });
+        hooks.push(hook);
       }
       for (const hook of hooks) {
         if (!hook.exited && !hook.killed && (now - hook.started) / 1000 > hook.timeout_s) {
@@ -427,7 +509,7 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
       for (let i = hooks.length - 1; i >= 0; i--) if (hooks[i].exited) hooks.splice(i, 1);
 
       // 时间窗到点后排着的作业不算「有活」：排队程序照样退出，执行机可以睡；解除时间窗后再开排队程序
-      pending = !!current || orphanAlive || hooks.length > 0 || (state.items.some(i => i.state === 'queued') && !heldByCurfew(state, now) && !isPaused(state));
+      pending = !!current || orphanAlive || hooks.length > 0 || hookQueue.length > 0 || (state.items.some(i => i.state === 'queued') && !heldByCurfew(state, now) && !isPaused(state));
       writeJson(paths().state, state);
       writeViews(state);
     });

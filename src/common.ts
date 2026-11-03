@@ -138,12 +138,21 @@ export const JUST_PASSED_MIN = 30;
 export function nextClock(hhmm: string, now = new Date()) {
   const match = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
   if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) fail(`钟点写法不认识：${hhmm}（例：06:45、now、+30m）`);
-  const at = new Date(now);
-  at.setHours(Number(match[1]), Number(match[2]), 0, 0);
-  const day = 86_400_000;
-  const ahead = ((at.getTime() - now.getTime()) % day + day) % day;   // 往后数到这个钟点还要多久
-  if (ahead === 0 || day - ahead <= JUST_PASSED_MIN * 60_000) return { at: new Date(now), justPassed: ahead !== 0 };
-  return { at: new Date(now.getTime() + ahead), justPassed: false };
+  // 按本地日历算昨天、今天、明天的这个钟点（不用固定的 24 小时，夏令时那天一天不是 24 小时）
+  const onDay = (offset: number) => {
+    const at = new Date(now);
+    at.setDate(at.getDate() + offset);
+    at.setHours(Number(match[1]), Number(match[2]), 0, 0);
+    return at;
+  };
+  const grace = JUST_PASSED_MIN * 60_000;
+  for (const at of [onDay(0), onDay(-1)]) {
+    const past = now.getTime() - at.getTime();
+    if (past === 0) return { at: new Date(now), justPassed: false };
+    if (past > 0 && past <= grace) return { at: new Date(now), justPassed: true };
+  }
+  const today = onDay(0);
+  return { at: today.getTime() > now.getTime() ? today : onDay(1), justPassed: false };
 }
 
 export function sha256(text: string) {

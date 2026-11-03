@@ -11,7 +11,7 @@
 - 执行机：经 `<MCP 守护进程名，例：winhand>` 的 `run` 调用 `csa`；数据目录 `CSA_DATA_DIR=<目录>`
 - 看门狗：`<看门狗会话 id，开好以后填>`
 - 总调度换不换会话：`不换`（默认：长驻，靠平台的自动压缩）或 `超过 <N> 万在票的边界换`。用户定的是哪种就写哪种；没写就是不换
-- 模型（[组合用模型](../models.md)）：子会话默认 `claude-opus-5-5`；看门狗 `<影子试验过了才填候选模型；没试过就不填，跟总调度一样>`；看门狗换新的上下文阈值 `15 万`（看门狗是 Haiku 5.5 时写 `9 万`：Haiku 5.5 单次请求超过 10 万 token 价格变 5 倍）
+- 模型（[组合用模型](../models.md)）：子会话默认 `claude-opus-5-5`；看门狗 `<两段试验都过了才填候选模型；没试过就不填，跟总调度一样>`；看门狗换新的上下文阈值 `15 万`（看门狗是 Haiku 5.5 时写 `9 万`：Haiku 5.5 单次请求超过 10 万 token 价格变 5 倍）
 
 ## 起步（每条线只做一次）
 
@@ -46,7 +46,7 @@
 ## 派单
 
 0. **一张票一个子会话（默认）。** 新票用 `create_session` 开新会话，`model` 照票头的 `model` 填，票头没写就用这条线参数里的子会话默认模型；开场带授权位置、这份规矩里给子会话的那份（[worker.md](worker.md)）、票的路径、上一张票的 run log 和交接要点。只有紧接着做同一件事、原会话上下文又不到 30 万 token，才派给原会话。一条线上同时只有一个子会话在做票。旧会话交回后留着不归档。
-1. 照 [templates/ticket.md](../../templates/ticket.md) 写票：票头（scope、forbid、owner）、「**达标」、gate 块。票头 `model` 默认不写（用 Opus）；只有 gate 里没有 `human` 项、每条达标都由 gate 自动判、`publish: []` 的纯机械票，才可以写 `model: sonnet`，gate 不过两次就作废、用 Opus 重开。gate 里的检查只读结果，不重跑重活。子会话交了草案的，在草案上改。
+1. 照 [templates/ticket.md](../../templates/ticket.md) 写票：票头（scope、forbid、owner）、「**达标」、gate 块。票头 `model` 这一期只写 `opus` 或不写：做票的子会话不降模型（[组合用模型](../models.md) 第 3 节）。gate 里的检查只读结果，不重跑重活。子会话交了草案的，在草案上改。
 2. 运行 `csa ticket dispatch <票> --line <线> --owner <代号>`，台账记下判法哈希。
 3. 用 `send_message`（priority `now`）发给子会话：票的路径、授权一节的行号和哈希、[worker.md](worker.md)。写明「核过即开工」。消息不超过 1500 字，细节给出处。
 4. 开工前要补判法：先改票，再 `csa ticket amend <票> --reason "<理由>"`；开工以后不改。
@@ -77,6 +77,6 @@
 
 ## 看门狗
 
-- 用 `create_session` 开看门狗，`model` 照这条线参数里的看门狗模型填（没填就不给，跟你一样），开场消息是 [watchdog.md](watchdog.md) 加上这条线的参数。换看门狗的模型要先过影子试验（[组合用模型](../models.md) 第 5 节）。由你开，它就是你的子会话，它的一轮出错时你可能收到通知（工具说明写的是 where enabled）。
+- 用 `create_session` 开看门狗，`model` 照这条线参数里的看门狗模型填（没填就不给，跟你一样），开场消息是 [watchdog.md](watchdog.md) 加上这条线的参数。换看门狗的模型要先过两段试验（[组合用模型](../models.md) 第 5 节）。由你开，它就是你的子会话，它的一轮出错时你可能收到通知（工具说明写的是 where enabled）。
 - 再用 `create_trigger`（`persistent_session_id` 填看门狗的会话 id，每小时一次）配一个兜底：它的 `send_later` 链子断了，最多一小时能接上。
 - 它先只观察两轮。两轮记录和你自己的判断对得上，就回它「接手」，并停掉你自己的巡检。

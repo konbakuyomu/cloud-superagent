@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const csa = join(repo, 'bin', 'csa.mjs');
@@ -294,6 +294,24 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   const c71 = JSON.parse(board(d, ['ticket', 'show', '71', '--dir', lineDir, '--json']).out);
   const c70 = JSON.parse(board(d, ['ticket', 'show', '70', '--dir', lineDir, '--json']).out);
   check('T19 show 给出票头的 model；没写的给 null', c71.model === 'sonnet' && c70.model === null, JSON.stringify([c71.model, c70.model]));
+
+  // Codex 审查后修的：--prepare 先查分支是不是已经在别的 worktree 检出
+  git(codeRepo, 'branch', 't73', 'main');
+  git(codeRepo, 'worktree', 'add', join(parent, 'code-repo-t73-a'), 't73');
+  ticket('73', { front: 'owner: B\nscope:\n  code-repo: { branch: t73, base_branch: main, path: code-repo-t73-b, paths: ["tools/**"] }', criteria: '1. 过。', gateBlock: passGate });
+  const p73 = board(d, ['ticket', 'dispatch', '73', '--dir', lineDir, '--owner', 'B', '--prepare']);
+  check('T20 分支已经在别的 worktree 检出：--prepare 不让派，不建新目录，台账没这张票',
+    p73.code === 1 && p73.out.includes('已经在') && !existsSync(join(parent, 'code-repo-t73-b')) && !ledger().tickets['73'], p73.out);
+  // 同号的票在两条线上：show 按线分开作业
+  const lineDir2 = join(lineRepo, '.scratch', 'demo2');
+  write(join(lineDir2, 'issues', '65-other.md'), `---\n${scopeFront()}\n---\n\n# 65: 另一条线\n\n**达标（事先定）：**\n1. 过。\n\n\`\`\`gate\n${passGate}\n\`\`\`\n`);
+  board(d, ['ticket', 'init', '--dir', lineDir2]);
+  board(d, ['ticket', 'dispatch', '65', '--dir', lineDir2, '--owner', 'C']);
+  const job65b = JSON.parse(board(d, ['queue', 'add', '--owner', 'C', '--ticket', '65', '--line', 'demo2', '--est', '1s', '--json', '--', node('0')]).out).id;
+  const s1 = JSON.parse(board(d, ['ticket', 'show', '65', '--dir', lineDir, '--json']).out);
+  const s2 = JSON.parse(board(d, ['ticket', 'show', '65', '--dir', lineDir2, '--json']).out);
+  check('T21 同号的票在两条线上：写了 --line 的作业只进自己那条线的卡片；没写的标 line_unknown',
+    !s1.jobs.some(j => j.id === job65b) && s2.jobs.some(j => j.id === job65b && !j.line_unknown) && s1.jobs.some(j => j.id === job65 && j.line_unknown), JSON.stringify([s1.jobs, s2.jobs]));
 }
 
 // ---------- 命令行本身（这个仓库加的） ----------
@@ -421,6 +439,85 @@ const eventLines = d => existsSync(join(d, 'events.jsonl')) ? readFileSync(join(
   const rs = board(d, ['queue', 'resume']);
   await runner(d);
   check('Q27 resume 以后排着的照常跑；被急停停掉的不自动重排', rs.code === 0 && rs.out.includes('急停已解除') && item(d, 'B').state === 'done' && item(d, 'A').state === 'killed', rs.out);
+}
+
+// ---------- Codex 审查后修的：检查过了要重新看准入、接手遗留进程、事件去重、钩子并发、钟点 ----------
+const waitFor = async (pred, ms = 8000) => { for (let t = 0; t < ms / 100 && !pred(); t++) await new Promise(r => setTimeout(r, 100)); return pred(); };
+{
+  const d = freshData();
+  // 检查自己设上急停然后退出 0：排队程序看到「检查过了」的同一跳，急停已经在了
+  board(d, ['queue', 'add', '--owner', 'A', '--est', '1s', '--if', `node "${csa}" queue pause --note 测试`, '--', node("console.log('JOB RAN')")]);
+  await runner(d);
+  const a = item(d, 'A');
+  check('Q28 检查过了的那一刻已经急停：作业不开，留在排队里', a.state === 'queued' && !a.start_at && !readFileSync(a.log, 'utf8').includes('JOB RAN'), JSON.stringify(a));
+}
+{
+  const d = freshData();
+  board(d, ['queue', 'add', '--owner', 'A', '--est', '1s', '--if', node('setTimeout(()=>{},2500)'), '--', node("console.log('JOB RAN')")]);
+  const run = runner(d);
+  await waitFor(() => item(d, 'A').checking_at);
+  board(d, ['queue', 'curfew', '--no-start-after', 'now']);
+  await run;
+  const a = item(d, 'A');
+  check('Q29 检查跑着的时候时间窗到点：检查过了也不开，作业留在排队里', a.state === 'queued' && !a.start_at && !existsSync(a.log) || (a.state === 'queued' && !readFileSync(a.log, 'utf8').includes('JOB RAN')), JSON.stringify(a));
+}
+{
+  const d = freshData();
+  const orphan = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { detached: process.platform !== 'win32', stdio: 'ignore' });
+  const now = new Date().toISOString();
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, items: [{ id: 'orph', owner: 'O', cmd: 'x', cwd: repo, est_s: 60, limit_s: 600, state: 'running', enq_at: now, start_at: now, pid: orphan.pid, log: join(d, 'logs', 'orph.log') }] }));
+  board(d, ['queue', 'pause']);
+  const exited = new Promise(r => orphan.on('exit', () => r(true)));
+  await runner(d);
+  const o = item(d, 'O');
+  check('Q30 接手上一个排队程序留下的作业：急停照样停掉，记 killed、原因 pause', o.state === 'killed' && o.reason === 'pause' && await Promise.race([exited, new Promise(r => setTimeout(() => r(false), 8000))]), JSON.stringify(o));
+}
+{
+  const d = freshData();
+  const out = join(hookDir, 'q31.txt');
+  const now = new Date().toISOString();
+  const old = { id: 'old1', owner: 'O', cmd: 'x', cwd: repo, est_s: 1, limit_s: 600, state: 'done', rc: 0, enq_at: now, start_at: now, end_at: now, log: join(d, 'logs', 'old1.log') };
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, items: [old] }));
+  write(join(d, 'events.jsonl'), JSON.stringify({ event_id: 'old1:done', id: 'old1', state: 'done' }) + '\n');
+  write(join(d, 'config.json'), JSON.stringify({ on_end: hookCmd(out) }));
+  await runner(d);
+  check('Q31 events.jsonl 里已经有的事件（写进去了、状态没落盘就崩了）：不重写，钩子不重跑', eventLines(d).length === 1 && !existsSync(out) && item(d, 'O').evented_at, JSON.stringify(eventLines(d)));
+}
+{
+  const d = freshData();
+  const out = join(hookDir, 'q32.txt');
+  const now = new Date().toISOString();
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, items: [{ id: 'old2', owner: 'O', cmd: 'x', cwd: repo, est_s: 1, limit_s: 600, state: 'done', rc: 0, enq_at: now, start_at: now, end_at: now, log: join(d, 'logs', 'old2.log') }] }));
+  const c = board(d, ['queue', 'config', '--on-end', hookCmd(out)]);
+  await runner(d);
+  check('Q32 第一次配结束钩子：之前就结束的作业不补写事件、不补跑钩子', c.out.includes('不补写') && !existsSync(out) && eventLines(d).length === 0, c.out);
+}
+{
+  const d = freshData();
+  board(d, ['queue', 'add', '--owner', 'S', '--est', '1s', '--if', node("console.log('CHECKPROBE');process.exit(1)"), '--', node('0')]);
+  await runner(d);
+  const it = item(d, 'S');
+  check('Q33 检查没过：原因只写 rc，不带检查的输出；事件里也没有；输出在作业日志里',
+    it.state === 'skipped' && !it.reason.includes('CHECKPROBE') && !JSON.stringify(eventLines(d)).includes('CHECKPROBE') && readFileSync(it.log, 'utf8').includes('CHECKPROBE'), JSON.stringify(it));
+}
+{
+  const d = freshData();
+  const out = join(hookDir, 'q34.txt');
+  const slow = join(hookDir, 'slow.mjs');
+  write(slow, `import { appendFileSync } from 'node:fs';\nappendFileSync(process.argv[2], 'start ' + Date.now() + '\\n');\nsetTimeout(() => appendFileSync(process.argv[2], 'end ' + Date.now() + '\\n'), 1500);\n`);
+  board(d, ['queue', 'config', '--on-end', `node "${slow}" "${out}"`, '--on-end-timeout', '20s']);
+  for (const o of ['A', 'B', 'C', 'D']) board(d, ['queue', 'add', '--owner', o, '--est', '1s', '--', node('0')]);
+  await runner(d);
+  const marks = readFileSync(out, 'utf8').trim().split('\n').map(l => l.split(' ')).map(([k, t]) => [k, Number(t)]).sort((x, y) => x[1] - y[1]);
+  let live = 0, peak = 0;
+  for (const [k] of marks) { live += k === 'start' ? 1 : -1; peak = Math.max(peak, live); }
+  check('Q34 结束钩子最多同时跑 2 个，4 个都跑完', marks.filter(m => m[0] === 'end').length === 4 && peak <= 2, JSON.stringify(marks));
+}
+{
+  const probe = `import('${pathToFileURL(join(repo, 'src', 'common.ts')).href}').then(m => { const r = m.nextClock('04:00', new Date(2026, 2, 7, 12, 0)); console.log(JSON.stringify({ h: r.at.getHours(), d: r.at.getDate(), j: r.justPassed })); })`;
+  const r = spawnSync(process.execPath, ['--import', 'tsx', '-e', probe], { cwd: repo, encoding: 'utf8', env: { ...process.env, TZ: 'America/New_York' } });
+  const v = JSON.parse(r.stdout.trim() || '{}');
+  check('Q35 跨夏令时那一天：钟点按本地日历算（纽约 3 月 7 日中午写 04:00 → 3 月 8 日 04:00，不是 05:00）', v.h === 4 && v.d === 8 && v.j === false, `${r.stdout}${r.stderr}`);
 }
 
 console.log(failed ? `\n${failed} 项没过` : '\n全部通过');
