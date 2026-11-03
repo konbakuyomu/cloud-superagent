@@ -4,7 +4,7 @@
 // Q/P/T/G 共 34 项照搬自原来的私有任务仓库的调度测试，只把 board 换成 csa、改成不经 shell 起子进程；C1–C5 是这个仓库加的。
 // `npm test` 会跑；Linux、macOS、Windows 都能跑，只要有 node 和 git。
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -178,7 +178,10 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   check('G3 改了范围外的文件 → out-of-scope；碰了禁区 → forbidden-path；gate 不过、退出码 1、台账「gate 不过」',
     g.code === 1 && r.findings.some(f => f.code === 'out-of-scope' && f.message.includes('README.md')) && r.findings.some(f => f.code === 'forbidden-path') && ledger().tickets['61'].status === 'gate-failed', g.out);
   spawnSync('git', ['checkout', '--', '.'], { cwd: codeRepo });
-  spawnSync('git', ['clean', '-fdq'], { cwd: codeRepo });
+  // 只删这一步自己建的两个文件和一个空目录（一次一个明确路径），不用 git clean：执行机的规矩不许批量删除
+  unlinkSync(join(codeRepo, 'README.md'));
+  unlinkSync(join(codeRepo, 'generated', 'out.bin'));
+  rmdirSync(join(codeRepo, 'generated'));
 
   ticket('61', { front: scopeFront(), criteria: '1. 跑通。\n2. 开跑前补的一条。\n3. 偷偷放宽。', gateBlock: passGate });
   g = board(d, ['gate', '61', '--dir', lineDir, '--json']);
