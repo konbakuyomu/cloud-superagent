@@ -7,7 +7,7 @@
 ```sh
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # node test/dispatch.test.mjs：80 个场景，约 2.5 分钟
+npm test            # node test/dispatch.test.mjs：81 个场景，约 2.5 分钟
 ```
 
 - 要 Node 20.6+ 和 git（测试会在临时目录里建 git 仓库、做提交）。不用网络，不用 Claude。

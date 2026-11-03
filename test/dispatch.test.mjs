@@ -31,7 +31,7 @@ const runner = (data, extra = [], env = {}) => new Promise(done => {
   child.stdout.on('data', d => { out += d; });
   child.stderr.on('data', d => { out += d; });
   // 排队程序 120 秒还没退出就算卡死：停掉它，输出里记 RUNNER-TIMEOUT，后面的断言自然不过
-  const guard = setTimeout(() => { out += '\nRUNNER-TIMEOUT'; child.kill('SIGKILL'); }, 120_000);
+  const guard = setTimeout(() => { out += '\nRUNNER-TIMEOUT'; failed++; console.log('✗ 排队程序 120 秒没退出，停掉了（算一项不过）'); child.kill('SIGKILL'); }, 120_000);
   child.on('exit', code => { clearTimeout(guard); done({ code, out }); });
 });
 const state = data => JSON.parse(readFileSync(join(data, 'queue.json'), 'utf8'));
@@ -453,9 +453,10 @@ const waitFor = async (pred, ms = 8000) => { for (let t = 0; t < ms / 100 && !pr
   const d = freshData();
   // 检查自己设上急停然后退出 0；排队程序 3 秒一跳，检查在两跳之间跑完：下一跳看到的一定是「检查已经退出 0、急停已经在了」
   board(d, ['queue', 'add', '--owner', 'A', '--est', '1s', '--if', `node "${csa}" queue pause --note 测试`, '--', node("console.log('JOB RAN')")]);
-  await runner(d, ['--tick', '3000']);
+  const r28 = await runner(d, ['--tick', '3000']);
   const a = item(d, 'A');
-  check('Q28 检查过了的那一刻已经急停：作业不开，留在排队里', a.state === 'queued' && !a.start_at && !readFileSync(a.log, 'utf8').includes('JOB RAN'), JSON.stringify(a));
+  check('Q28 检查过了的那一刻已经急停：作业不开，留在排队里（走的是「检查退出 0 以后重新看准入」那一支）',
+    a.state === 'queued' && !a.start_at && !readFileSync(a.log, 'utf8').includes('JOB RAN') && r28.out.includes('检查过了，但现在不能开'), `${JSON.stringify(a)}\n${r28.out}`);
 }
 {
   const d = freshData();
@@ -564,6 +565,25 @@ const waitFor = async (pred, ms = 8000) => { for (let t = 0; t < ms / 100 && !pr
   await runner(d);
   const good = readFileSync(join(d, 'events.jsonl'), 'utf8').split('\n').filter(l => { try { JSON.parse(l); return true; } catch { return false; } }).map(l => JSON.parse(l).event_id);
   check('Q38 events.jsonl 最后一行没写完：新事件另起一行，不被吞掉', good.includes('a:done') && good.includes('new1:done'), JSON.stringify(good));
+}
+
+{
+  // Codex 第三轮复审：检查跑着的时候作业被取消了，旧检查进程还活着，也得等它退出才开下一个作业
+  const d = freshData();
+  const mark = join(hookDir, 'q39.txt');
+  const sleeper = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setTimeout(()=>{},60000)"], { detached: process.platform !== 'win32', stdio: 'ignore' });
+  let gone = 0;
+  sleeper.on('exit', () => { gone = Date.now(); });
+  await new Promise(r => setTimeout(r, 300));
+  const t = new Date().toISOString();
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, items: [
+    { id: 'gone', owner: 'G', cmd: 'x', cwd: repo, est_s: 1, limit_s: 600, state: 'cancelled', reason: 'cancel', enq_at: t, end_at: t, log: join(d, 'logs', 'gone.log'), if_cmd: 'x', if_timeout_s: 30, checking_at: t, checking_pid: sleeper.pid },
+    { id: 'next', owner: 'N', cmd: node("require('fs').writeFileSync(process.env.Q39_MARK, String(Date.now()))"), cwd: repo, est_s: 1, limit_s: 600, state: 'queued', enq_at: t, log: join(d, 'logs', 'next.log') },
+  ] }));
+  await runner(d, [], { Q39_MARK: mark });
+  const started = existsSync(mark) ? Number(readFileSync(mark, 'utf8')) : 0;
+  check('Q39 已取消的作业留着还活着的旧检查：先停掉它，等它退出才开下一个作业', gone > 0 && started >= gone && item(d, 'N').state === 'done', JSON.stringify({ gone, started }));
+  try { process.kill(sleeper.pid, 'SIGKILL'); } catch { /* 已经停了 */ }
 }
 
 console.log(failed ? `\n${failed} 项没过` : '\n全部通过');

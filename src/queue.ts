@@ -398,7 +398,7 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
           delete item.checking_pid;
           if (slot.exited.code === 0 && !slot.timedOut && !admissible(state, item, now)) {
             // 检查跑着的时候急停了、时间窗到点了、或者剩的时间放不下了：作业留在排队里，以后重新检查
-            console.log(`${clock(now)} ${item.id} 检查过了，但现在不能开（急停或时间窗），留在排队里`);
+            console.log(`${clock(now)} ${item.id} 检查过了，但现在不能开（急停或时间窗），留在排队里`);  // 测试 Q28 认这一行
             current = null;
           } else if (slot.exited.code === 0 && !slot.timedOut) {
             current = spawnSlot(item.id, 'job', item.cmd, item);
@@ -446,7 +446,8 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
       let orphanAlive = false;
       const { killAt: orphanKillAt } = curfewTimes(state.curfew);
       for (const item of state.items) {
-        if (item.state === 'queued' && item.checking_at && item.id !== current?.id) {
+        // 不管作业现在是什么状态（排着，还是检查跑着的时候被取消了），只要留着旧检查的 pid，就按进程活不活着处理
+        if ((item.checking_at || item.checking_pid) && item.id !== current?.id) {
           if (pidAlive(item.checking_pid)) {
             // 旧检查还活着：停掉它，等它真的退出了再重新检查；这期间执行机算占着，不开别的
             orphanAlive = true;

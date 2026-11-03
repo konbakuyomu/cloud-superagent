@@ -26,7 +26,7 @@ DeepSeek 公开过一个 Super-agent 研究原型：一个总控（Router）只�
 
 ```sh
 npm ci
-npm test                      # 80 个场景，约 2.5 分钟
+npm test                      # 81 个场景，约 2.5 分钟
 
 export CSA_DATA_DIR=$PWD/.csa-data
 node bin/csa.mjs queue add --owner TEST --est 5s -- "echo hello"
