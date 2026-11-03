@@ -30,7 +30,9 @@ const runner = (data, extra = [], env = {}) => new Promise(done => {
   let out = '';
   child.stdout.on('data', d => { out += d; });
   child.stderr.on('data', d => { out += d; });
-  child.on('exit', code => done({ code, out }));
+  // 排队程序 120 秒还没退出就算卡死：停掉它，输出里记 RUNNER-TIMEOUT，后面的断言自然不过
+  const guard = setTimeout(() => { out += '\nRUNNER-TIMEOUT'; child.kill('SIGKILL'); }, 120_000);
+  child.on('exit', code => { clearTimeout(guard); done({ code, out }); });
 });
 const state = data => JSON.parse(readFileSync(join(data, 'queue.json'), 'utf8'));
 const item = (data, owner) => state(data).items.find(i => i.owner === owner);
@@ -312,6 +314,10 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   const s2 = JSON.parse(board(d, ['ticket', 'show', '65', '--dir', lineDir2, '--json']).out);
   check('T21 同号的票在两条线上：写了 --line 的作业只进自己那条线的卡片；没写的标 line_unknown',
     !s1.jobs.some(j => j.id === job65b) && s2.jobs.some(j => j.id === job65b && !j.line_unknown) && s1.jobs.some(j => j.id === job65 && j.line_unknown), JSON.stringify([s1.jobs, s2.jobs]));
+  board(d, ['ticket', 'set', '65', 'started', '--dir', lineDir2]);
+  const s3 = JSON.parse(board(d, ['ticket', 'show', '65', '--dir', lineDir2, '--json']).out);
+  const s3t = board(d, ['ticket', 'show', '65', '--dir', lineDir2]).out;
+  check('T22 线不明的作业只列出来、标「线不明」，不拿来指下一跳', !s3.next.includes(job65) && s3t.includes('线不明'), `${s3.next}\n${s3t}`);
 }
 
 // ---------- 命令行本身（这个仓库加的） ----------
@@ -445,9 +451,9 @@ const eventLines = d => existsSync(join(d, 'events.jsonl')) ? readFileSync(join(
 const waitFor = async (pred, ms = 8000) => { for (let t = 0; t < ms / 100 && !pred(); t++) await new Promise(r => setTimeout(r, 100)); return pred(); };
 {
   const d = freshData();
-  // 检查自己设上急停然后退出 0：排队程序看到「检查过了」的同一跳，急停已经在了
+  // 检查自己设上急停然后退出 0；排队程序 3 秒一跳，检查在两跳之间跑完：下一跳看到的一定是「检查已经退出 0、急停已经在了」
   board(d, ['queue', 'add', '--owner', 'A', '--est', '1s', '--if', `node "${csa}" queue pause --note 测试`, '--', node("console.log('JOB RAN')")]);
-  await runner(d);
+  await runner(d, ['--tick', '3000']);
   const a = item(d, 'A');
   check('Q28 检查过了的那一刻已经急停：作业不开，留在排队里', a.state === 'queued' && !a.start_at && !readFileSync(a.log, 'utf8').includes('JOB RAN'), JSON.stringify(a));
 }
@@ -459,7 +465,7 @@ const waitFor = async (pred, ms = 8000) => { for (let t = 0; t < ms / 100 && !pr
   board(d, ['queue', 'curfew', '--no-start-after', 'now']);
   await run;
   const a = item(d, 'A');
-  check('Q29 检查跑着的时候时间窗到点：检查过了也不开，作业留在排队里', a.state === 'queued' && !a.start_at && !existsSync(a.log) || (a.state === 'queued' && !readFileSync(a.log, 'utf8').includes('JOB RAN')), JSON.stringify(a));
+  check('Q29 检查跑着的时候时间窗到点：检查过了也不开，作业留在排队里', a.state === 'queued' && !a.start_at && (!existsSync(a.log) || !readFileSync(a.log, 'utf8').includes('JOB RAN')), JSON.stringify(a));
 }
 {
   const d = freshData();
@@ -518,6 +524,46 @@ const waitFor = async (pred, ms = 8000) => { for (let t = 0; t < ms / 100 && !pr
   const r = spawnSync(process.execPath, ['--import', 'tsx', '-e', probe], { cwd: repo, encoding: 'utf8', env: { ...process.env, TZ: 'America/New_York' } });
   const v = JSON.parse(r.stdout.trim() || '{}');
   check('Q35 跨夏令时那一天：钟点按本地日历算（纽约 3 月 7 日中午写 04:00 → 3 月 8 日 04:00，不是 05:00）', v.h === 4 && v.d === 8 && v.j === false, `${r.stdout}${r.stderr}`);
+}
+
+// ---------- Codex 第二轮复审后修的：要停的遗留进程重试强停、旧检查退出前不重检、事件文件的半行 ----------
+{
+  const d = freshData();
+  const stubborn = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setTimeout(()=>{},60000)"], { detached: process.platform !== 'win32', stdio: 'ignore' });
+  const exited = new Promise(r => stubborn.on('exit', () => r(true)));
+  await new Promise(r => setTimeout(r, 300));
+  const t = new Date().toISOString(), long = new Date(Date.now() - 60_000).toISOString();
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, paused: { at: t }, items: [{ id: 'stub', owner: 'O', cmd: 'x', cwd: repo, est_s: 60, limit_s: 600, state: 'running', enq_at: t, start_at: t, pid: stubborn.pid, log: join(d, 'logs', 'stub.log'), kill_sent: 'pause', kill_sent_at: long }] }));
+  const r36 = await runner(d);
+  const o = item(d, 'O');
+  check('Q36 接手的作业「要停过了」还活着（不理 TERM）：强制再停一次，记 killed、原因 pause',
+    o.state === 'killed' && o.reason === 'pause' && r36.out.includes('强制停') && await Promise.race([exited, new Promise(r => setTimeout(() => r(false), 5000))]), `${JSON.stringify(o)}\n${r36.out}`);
+  try { process.kill(stubborn.pid, 'SIGKILL'); } catch { /* 已经停了 */ }
+}
+{
+  const d = freshData();
+  const mark = join(hookDir, 'q37.txt');
+  // 不理 TERM 的旧检查：第一次停不掉，得等强制停
+  const sleeper = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setTimeout(()=>{},60000)"], { detached: process.platform !== 'win32', stdio: 'ignore' });
+  let sleeperGone = 0;
+  sleeper.on('exit', () => { sleeperGone = Date.now(); });
+  await new Promise(r => setTimeout(r, 300));
+  const t = new Date().toISOString();
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, items: [{ id: 'chk', owner: 'C', cmd: node('0'), cwd: repo, est_s: 1, limit_s: 600, state: 'queued', enq_at: t, log: join(d, 'logs', 'chk.log'), if_cmd: node("require('fs').writeFileSync(process.env.Q37_MARK, String(Date.now()))"), if_timeout_s: 30, checking_at: t, checking_pid: sleeper.pid }] }));
+  const r37 = await runner(d, [], { Q37_MARK: mark });
+  const started = existsSync(mark) ? Number(readFileSync(mark, 'utf8')) : 0;
+  check('Q37 上一个排队程序留下的检查还活着（不理 TERM）：先停、再强制停，等它退出以后才重新检查',
+    sleeperGone > 0 && started >= sleeperGone && item(d, 'C').state === 'done' && r37.out.includes('留下的检查'), JSON.stringify({ sleeperGone, started, st: item(d, 'C').state, out: r37.out }));
+  try { process.kill(sleeper.pid, 'SIGKILL'); } catch { /* 已经停了 */ }
+}
+{
+  const d = freshData();
+  const t = new Date().toISOString();
+  write(join(d, 'queue.json'), JSON.stringify({ version: 1, curfew: null, items: [{ id: 'new1', owner: 'N', cmd: 'x', cwd: repo, est_s: 1, limit_s: 600, state: 'done', rc: 0, enq_at: t, start_at: t, end_at: t, log: join(d, 'logs', 'new1.log') }] }));
+  writeFileSync(join(d, 'events.jsonl'), JSON.stringify({ event_id: 'a:done', id: 'a', state: 'done' }) + '\n{"event_id":"b:do');
+  await runner(d);
+  const good = readFileSync(join(d, 'events.jsonl'), 'utf8').split('\n').filter(l => { try { JSON.parse(l); return true; } catch { return false; } }).map(l => JSON.parse(l).event_id);
+  check('Q38 events.jsonl 最后一行没写完：新事件另起一行，不被吞掉', good.includes('a:done') && good.includes('new1:done'), JSON.stringify(good));
 }
 
 console.log(failed ? `\n${failed} 项没过` : '\n全部通过');

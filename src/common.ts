@@ -212,16 +212,23 @@ export function startLogged(command: string, cwd: string, log: string, shell?: s
   return child;
 }
 
-/** 停掉整棵进程树：Windows 用 taskkill /T /F；POSIX 先 TERM 整组，5 秒后还在就 KILL（不阻塞，好让事件循环收子进程）。 */
-export function killTree(pid: number) {
+/**
+ * 停掉整棵进程树：Windows 用 taskkill /T /F；POSIX 先 TERM 整组，5 秒后还在就 KILL（不阻塞，好让事件循环收子进程）。
+ * force：POSIX 直接 KILL。用在「上次要停、进程还活着」的重试上：上次那个 5 秒后的 KILL 可能随排队程序重启丢了。
+ */
+export function killTree(pid: number, force = false) {
   if (isWin) {
     spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
     return;
   }
   const signal = (sig: NodeJS.Signals) => { try { process.kill(-pid, sig); } catch { try { process.kill(pid, sig); } catch { /* 已经结束 */ } } };
+  if (force) { signal('SIGKILL'); return; }
   signal('SIGTERM');
   setTimeout(() => signal('SIGKILL'), 5000);
 }
+
+/** 上次要停一个进程以后，过了这么久它还活着，就再停一次（强制）。 */
+export const KILL_RETRY_MS = 8000;
 
 /** 同步跑一条命令到结束，带超时；返回退出码和输出。 */
 export function runCaptured(command: string, cwd: string, timeoutSeconds: number, shell?: string) {

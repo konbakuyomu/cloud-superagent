@@ -4,7 +4,7 @@ import type { ChildProcess } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
-  clock, dataDir, fail, formatDuration, killTree, nextClock, parseDuration, pidAlive, readJson, startLogged,
+  clock, dataDir, fail, formatDuration, KILL_RETRY_MS, killTree, nextClock, parseDuration, pidAlive, readJson, startLogged,
   withLock, writeJson, writeText,
 } from './common.ts';
 
@@ -19,7 +19,9 @@ export interface Item {
   /** 线的 id（csa queue add --line）：同号的票在不同的线上，靠它分开。 */
   line?: string;
   /** 接手的遗留作业已经被要求停掉的原因（pause / cancel / limit / curfew）。 */
-  kill_sent?: string;
+  kill_sent?: string; kill_sent_at?: string;
+  /** 接手的遗留检查进程，要它停的时刻（停之前作业不重新检查）。 */
+  checking_kill_at?: string;
   /** 结束事件已经写进 events.jsonl（和跑过钩子）的时刻；有它就不再写。 */
   evented_at?: string;
 }
@@ -337,7 +339,10 @@ const HOOK_PARALLEL = 2;
 function loadEventIds() {
   const ids = new Set<string>();
   if (!existsSync(paths().events)) return ids;
-  for (const line of readFileSync(paths().events, 'utf8').split(/\r?\n/)) {
+  const text = readFileSync(paths().events, 'utf8');
+  // 最后一行没写完（写到一半崩了）：先补一个换行把它隔开，否则下一条事件会接在它后面，两行都坏
+  if (text.length && !text.endsWith('\n')) appendFileSync(paths().events, '\n');
+  for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try { const e = JSON.parse(line); ids.add(e.event_id ?? `${e.id}:${e.state}`); } catch { /* 半行：写到一半崩了，跳过 */ }
   }
@@ -442,9 +447,23 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
       const { killAt: orphanKillAt } = curfewTimes(state.curfew);
       for (const item of state.items) {
         if (item.state === 'queued' && item.checking_at && item.id !== current?.id) {
-          if (pidAlive(item.checking_pid)) killTree(item.checking_pid!);
-          delete item.checking_at;
-          delete item.checking_pid;
+          if (pidAlive(item.checking_pid)) {
+            // 旧检查还活着：停掉它，等它真的退出了再重新检查；这期间执行机算占着，不开别的
+            orphanAlive = true;
+            if (!item.checking_kill_at) {
+              item.checking_kill_at = iso(now);
+              console.log(`${clock(now)} 停掉上一个排队程序留下的检查（${item.id}），等它退出再重新检查`);
+              killTree(item.checking_pid!);
+            } else if (now - Date.parse(item.checking_kill_at) > KILL_RETRY_MS) {
+              item.checking_kill_at = iso(now);
+              console.log(`${clock(now)} ${item.id} 留下的检查要停以后还活着，强制停`);
+              killTree(item.checking_pid!, true);
+            }
+          } else {
+            delete item.checking_at;
+            delete item.checking_pid;
+            delete item.checking_kill_at;
+          }
         }
         if (item.state !== 'running' || item.id === current?.id) continue;
         if (pidAlive(item.pid)) {
@@ -454,13 +473,19 @@ export async function runLoop(idleExit: number, tickMs = 2000) {
             : (now - Date.parse(item.start_at!)) / 1000 > item.limit_s ? 'limit'
             : orphanKillAt !== null && now >= orphanKillAt ? 'curfew' : undefined;
           if (why && !item.kill_sent) {
-            item.kill_sent = why;
+            Object.assign(item, { kill_sent: why, kill_sent_at: iso(now) });
             console.log(`${clock(now)} 停掉接手的 ${item.id}（${REASON_TEXT[why]}）`);
             killTree(item.pid!);
+          } else if (item.kill_sent && now - Date.parse(item.kill_sent_at ?? '') > KILL_RETRY_MS || (item.kill_sent && !item.kill_sent_at)) {
+            // 要停过了还活着（上次的强制停止可能随排队程序重启丢了）：强制再停一次
+            item.kill_sent_at = iso(now);
+            console.log(`${clock(now)} ${item.id} 要停以后还活着，强制停`);
+            killTree(item.pid!, true);
           }
         } else if (item.kill_sent) {
           Object.assign(item, { state: 'killed', end_at: iso(now), rc: null, reason: item.kill_sent });
           delete item.kill_sent;
+          delete item.kill_sent_at;
         } else Object.assign(item, { state: 'lost', end_at: iso(now), rc: null, reason: '排队程序重启前就在跑，退出码不明' });
       }
       if (!current && !orphanAlive) {

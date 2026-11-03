@@ -7,13 +7,13 @@
 ```sh
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # node test/dispatch.test.mjs：76 个场景，约 2 分钟
+npm test            # node test/dispatch.test.mjs：80 个场景，约 2.5 分钟
 ```
 
 - 要 Node 20.6+ 和 git（测试会在临时目录里建 git 仓库、做提交）。不用网络，不用 Claude。
 - 每个场景用自己的临时数据目录（`CSA_DATA_DIR`）和临时仓库，互不影响，不碰你机器上的任何状态。
 - 测试起子进程一律 `node bin/csa.mjs …`，**不经 shell**，所以 Windows 上参数也原样传过去。被排的作业本身经 shell 跑（Windows pwsh，其他 bash）。
-- 有几项和时间有关（排队程序 150 ms 一跳、时间窗 `+5s` / `+6s`、钩子和检查的时限 2 秒）。很慢的机器上偶发失败时，先看是不是这几项（Q7–Q10、Q15、Q20、Q25、Q28–Q30、Q34）。
+- 有几项和时间有关（排队程序 150 ms 一跳、时间窗 `+5s` / `+6s`、钩子和检查的时限 2 秒）。很慢的机器上偶发失败时，先看是不是这几项（Q7–Q10、Q15、Q20、Q25、Q28–Q30、Q34、Q36、Q37）。
 - CI：`.github/workflows/ci.yml`，ubuntu-latest 和 windows-latest 都跑 typecheck 和 test。
 
 ## 代码在哪

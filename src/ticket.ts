@@ -334,8 +334,10 @@ export function show(lineDir: string, id: string, queueItems: { id: string; tick
     if (hit) runLog = join(review, hit);
   }
   let next = NEXT_TEXT[entry.status];
-  const running = jobs.find(j => j.state === 'running' || j.state === 'queued');
-  const unacked = jobs.find(j => !['running', 'queued', 'cancelled', 'skipped'].includes(j.state) && !j.acked);
+  // 下一跳只看确定是这条线的作业；线不明的只列出来，不拿来指路
+  const own = jobs.filter(j => !('line_unknown' in j));
+  const running = own.find(j => j.state === 'running' || j.state === 'queued');
+  const unacked = own.find(j => !['running', 'queued', 'cancelled', 'skipped'].includes(j.state) && !j.acked);
   if (entry.status === 'started' && running) next = `等作业 ${running.id} 跑完（${running.state}）`;
   else if (entry.status === 'started' && unacked) next = `取作业 ${unacked.id} 的结果（csa queue log），取完 csa queue ack ${unacked.id}`;
   return {
@@ -351,7 +353,7 @@ export function showText(card: ReturnType<typeof show>) {
     `票 ${card.ticket}：${card.status_text}，${card.owner ?? '?'}${card.session ? `（${card.session}）` : ''}，更新 ${new Date(card.updated_at).toLocaleString('sv-SE')}`,
     `票文件：${card.file}`,
     `模型：${card.model ?? '票头没写，用总调度的默认（docs/models.md）'}`,
-    `作业：${card.jobs.length ? card.jobs.map(j => `${j.id} ${j.state}${j.rc !== null ? ` rc ${j.rc}` : ''}${j.acked ? '' : j.state === 'running' || j.state === 'queued' ? '' : ' 未取'}`).join('；') : '无'}`,
+    `作业：${card.jobs.length ? card.jobs.map(j => `${j.id} ${j.state}${j.rc !== null ? ` rc ${j.rc}` : ''}${j.acked ? '' : j.state === 'running' || j.state === 'queued' ? '' : ' 未取'}${'line_unknown' in j ? '（线不明：排的时候没写 --line）' : ''}`).join('；') : '无'}`,
     `gate：${card.gate ? `${card.gate.verdict}，${card.gate.md}` : '还没跑'}`,
     `提交：${Object.entries(card.heads).map(([k, h]) => `${k} ${short(h.dispatched)} → ${short(h.now)}`).join('；') || '票头没有 scope'}`,
     `run log：${card.run_log ?? '没找到'}`,
