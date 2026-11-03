@@ -233,7 +233,7 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
       && card.heads['code-repo']?.dispatched && card.heads['code-repo']?.now && card.run_log?.endsWith('t65-run.md') && card.next.includes('accept'), sj.out);
   const st = board(d, ['ticket', 'show', '65', '--dir', lineDir]);
   const stLines = st.out.trim().split('\n');
-  check('T8 文本输出每一项一行，下一跳在最后一行', st.code === 0 && stLines.length === 7 && stLines.at(-1).startsWith('下一跳：') && stLines.some(l => l.startsWith('gate：pass')), st.out);
+  check('T8 文本输出每一项一行，下一跳在最后一行', st.code === 0 && stLines.length === 8 && stLines.at(-1).startsWith('下一跳：') && stLines.some(l => l.startsWith('gate：pass')), st.out);
   check('T9 show 前后数据目录、线的目录和线所在仓库里所有文件的 mtime 不变', snapshot() === before65);
 
   // 第二期 6.4：csa ticket dispatch --prepare
@@ -277,6 +277,20 @@ const passGate = `- id: 1-runs\n  run: ${node("console.log('ALL GOOD')")}\n  exp
   board(d, ['ticket', 'dispatch', '70', '--dir', lineDir, '--owner', 'B']);
   const g70 = JSON.parse(board(d, ['gate', '70', '--dir', lineDir, '--json']).out);
   check('T16 没写 publish 的票，gate 写明不许做任何发布类动作', g70.notes.some(n => n.includes('不许做任何发布类动作')), JSON.stringify(g70.notes));
+
+  // 第三期：票头 model（docs/models.md）
+  ticket('71', { front: scopeFront('\nmodel: opus'), criteria: '1. 过。', gateBlock: passGate });
+  board(d, ['ticket', 'dispatch', '71', '--dir', lineDir, '--owner', 'B']);
+  const sha71 = ledger().tickets['71'].contract_sha;
+  ticket('71', { front: scopeFront('\nmodel: sonnet\neffort: high'), criteria: '1. 过。', gateBlock: passGate });
+  const g71 = JSON.parse(board(d, ['gate', '71', '--dir', lineDir, '--json']).out);
+  check('T17 只改票头的 model、effort，判法哈希不变，gate 不报 contract-changed', !g71.findings.some(f => f.code === 'contract-changed') && g71.contract_sha === sha71, JSON.stringify(g71.findings));
+  ticket('72', { front: scopeFront('\nmodel: gpt-9'), criteria: '1. 过。', gateBlock: passGate });
+  const p72 = board(d, ['ticket', 'dispatch', '72', '--dir', lineDir, '--owner', 'B']);
+  check('T18 票头 model 写法不认识：不让派，退出码 1', p72.code === 1 && p72.out.includes('gpt-9') && !ledger().tickets['72'], p72.out);
+  const c71 = JSON.parse(board(d, ['ticket', 'show', '71', '--dir', lineDir, '--json']).out);
+  const c70 = JSON.parse(board(d, ['ticket', 'show', '70', '--dir', lineDir, '--json']).out);
+  check('T19 show 给出票头的 model；没写的给 null', c71.model === 'sonnet' && c70.model === null, JSON.stringify([c71.model, c70.model]));
 }
 
 // ---------- 命令行本身（这个仓库加的） ----------

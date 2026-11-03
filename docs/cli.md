@@ -73,7 +73,7 @@ csa ticket set <票> <状态> [--note …] | accept <票> | amend <票> --reason
 - `dispatch` 记下判法哈希和票头 scope 里各仓库的当前提交。没有「**达标」段也没有 gate 块的票不让派；票头 `publish` 写错（不是列表、少了 repo 或 actions、有不认识的动作）不让派。
 - `dispatch --prepare`：票头 scope 里同时写了 `branch` 和 `path` 的仓库，`path`（相对线所在仓库的上一级目录）不在就 `git worktree add`。源仓库是上一级目录里和仓库名同名的文件夹，或 scope 里的 `repo` 字段。分支已经有就直接检出，没有就从 `base_branch`（默认 main）新开。`path` 已经是这个分支的 worktree 就不动；已经存在但不是这个仓库的 worktree、或在别的分支上，整次派单失败、什么都不改。先把所有仓库都核过再动手。台账记下 `prepared`。记下的提交是建好以后的 HEAD。
 - `show <票>`：一张卡片，纯读，不写任何文件。给出状态、负责会话、这张票在排队里的作业（按 `--ticket`）、gate 结论和 `.md` 路径、scope 里各仓库「派单时的提交 → 现在的 HEAD」、run log 的位置（票头 `run_log`，没写就找 `docs/review/t<票>-*.md`）、下一跳（按状态，开工中还看有没有在跑或没取的作业）。文本每项一行，下一跳在最后一行；`--json` 给全部字段。
-- **判法** = 票头里除 `owner`、`session`、`status` 以外的字段（所以 `publish`、`run_log`、`scope` 都算）+ 「**达标」那段（到 `**Blocked by`、`**Status` 或下一个标题为止）+ 所有 ```` ```gate ```` 块。改了这些哈希就变；只换 owner 不变。
+- **判法** = 票头里除 `owner`、`session`、`status`、`model`、`effort` 以外的字段（所以 `publish`、`run_log`、`scope` 都算）+ 「**达标」那段（到 `**Blocked by`、`**Status` 或下一个标题为止）+ 所有 ```` ```gate ```` 块。改了这些哈希就变；只换 owner、model、effort 不变。票头 `model` 只能是 `opus`、`sonnet`、`haiku`、`fable` 或完整的 `claude-…` 模型 id，写错了不让派；`show` 会显示它（[组合用模型](models.md)）。
 - 状态：`dispatched`、`started`、`handed-in`、`gate-failed`、`accepted`、`rejected`、`blocked`、`waiting-user`、`abandoned`。「已派」只能由 `dispatch` 设；`amend` 只在「已派」时能用，要理由，记下新旧哈希。
 
 ## csa gate：交回前的确定性检查

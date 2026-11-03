@@ -26,7 +26,7 @@ DeepSeek 公开过一个 Super-agent 研究原型：一个总控（Router）只�
 
 ```sh
 npm ci
-npm test                      # 63 个场景，约 1.5 分钟
+npm test                      # 66 个场景，约 1.5 分钟
 
 export CSA_DATA_DIR=$PWD/.csa-data
 node bin/csa.mjs queue add --owner TEST --est 5s -- "echo hello"
@@ -47,8 +47,9 @@ node bin/csa.mjs patrol                      # OK …
 3. [执行机接口和安全模型](docs/executor.md)：守护进程要提供什么，哪些能查出来、哪些拦不住。
 4. [命令约定](docs/cli.md)：四个命令的参数、数据目录、状态和异常码。
 5. [runbook](docs/runbook.md)：急停、恢复、时间窗和常见异常怎么处理。
-6. 角色提示词（v2.1）：[总调度](docs/roles/router.md)、[子会话](docs/roles/worker.md)、[看门狗](docs/roles/watchdog.md)；[票模板](templates/ticket.md)。
-7. [run log](docs/run-log.md)：这个仓库怎么来的、验证记录、第二期的草案。
+6. [组合用模型](docs/models.md)：哪个角色用哪个模型、哪里能省、换之前的影子试验。
+7. 角色提示词（v2.1）：[总调度](docs/roles/router.md)、[子会话](docs/roles/worker.md)、[看门狗](docs/roles/watchdog.md)；[票模板](templates/ticket.md)。
+8. [run log](docs/run-log.md)：这个仓库怎么来的、验证记录、第二期的草案。
 
 审代码的人和 Codex 先读 [AGENTS.md](AGENTS.md)。
 

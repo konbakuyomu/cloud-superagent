@@ -11,6 +11,7 @@ publish: []                              # 发布类动作：不许就写 []。�
                                           # 动作只能是 create-repo、visibility、push、pr、comment、upload；写了只是「可以问」，
                                           # 每一件仍要用户本人在执行动作的那个会话里说，总调度不转述同意
 run_log: docs/review/t<票号>-run.md        # 可省；csa ticket show 用它给出 run log 的位置
+model: opus                               # 可省，默认 Opus。和 owner 一样不算进判法。只有没有 human 项、达标全由 gate 自动判、publish: [] 的纯机械票才写 sonnet（docs/models.md）
 pc_budget: <执行机作业总时长，例：2 × 15 min>
 stop_if: ["要花钱", "要动执行机上仓库以外的设置", "判法写的前提不成立"]
 ---

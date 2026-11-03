@@ -7,7 +7,7 @@
 ```sh
 npm ci
 npm run typecheck   # tsc --noEmit
-npm test            # node test/dispatch.test.mjs：63 个场景，约 1.5 分钟
+npm test            # node test/dispatch.test.mjs：66 个场景，约 1.5 分钟
 ```
 
 - 要 Node 20.6+ 和 git（测试会在临时目录里建 git 仓库、做提交）。不用网络，不用 Claude。
@@ -37,7 +37,7 @@ npm test            # node test/dispatch.test.mjs：63 个场景，约 1.5 分�
 - **写文件**：状态文件一律 `writeJson` / `writeText`（先写临时文件再改名，Windows 上改名撞到读者会重试）。改 `queue.json`、`ledger.json` 一律在 `withLock` 里读改写。
 - **路径**：比较两个路径、算相对路径用 `inside()` / `canonical()`，不要 `startsWith` 或 `slice(length)`：Windows 的临时目录常是 8.3 短名，git 报的是长名，盘符大小写也会不同。
 - **不带个人默认值**：不写死任何人的路径、账号、域名。数据目录只来自 `--data-dir`、`CSA_DATA_DIR` 或平台的通用状态目录。
-- **判法哈希的范围**是对外约定（`src/ticket.ts` 的 `readTicket`）：票头除 `owner`、`session`、`status` 外的字段 + 「**达标」段 + 全部 gate 块。改它会让已经派出的票全部报 `contract-changed`，要在 run log 里写清楚。
+- **判法哈希的范围**是对外约定（`src/ticket.ts` 的 `readTicket`）：票头除 `owner`、`session`、`status`、`model`、`effort` 外的字段 + 「**达标」段 + 全部 gate 块。改它会让已经派出的票全部报 `contract-changed`，要在 run log 里写清楚。
 - **文字**：给人看的输出和文档用中文，短句，先说结论。命令、文件名、字段名保持英文。
 - **测试**：新行为先加场景，编号接着用（Q / P / T / G / C）。照搬自原仓库的 34 项（Q1–Q13、P1–P7、T1–T6、G1–G8）不改判法，只能改调用方式。第二期各项的判法在 [docs/run-log.md](docs/run-log.md) 第 6 节，事先定好，也不改。
 - **提交**：只提交写明的路径（`git add -- <路径>`、`git commit -m … -- <路径>`），不用 `git add -A`、`git commit -a`、`git stash`。这条规矩是写给共用工作区的，在这里也照做。

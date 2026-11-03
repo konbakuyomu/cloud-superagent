@@ -79,7 +79,8 @@ export function readTicket(file: string) {
     }
     criteria = lines.slice(start, end).join('\n').trim();
   }
-  const { owner, session, status, ...contractFront } = front;
+  // model / effort 和 owner 一样只说「谁来做、用多大的力」，不改判法：换模型不算改判法
+  const { owner, session, status, model, effort, ...contractFront } = front;
   const contract_sha = sha256(`${canonical(contractFront)}\n---\n${criteria}\n---\n${gateRaw.join('\n---\n')}`);
   return { raw, front, gates, criteria, contract_sha, hasCriteria: start >= 0 };
 }
@@ -138,6 +139,15 @@ export function init(opts: { dir: string; id?: string; authFile?: string; authHe
   saveConfig(config);
   if (!existsSync(ledgerFile(lineDir))) update(lineDir, () => {});
   return line;
+}
+
+/** 票头 model：这张票的子会话用哪个模型。没写就是总调度的默认（见 docs/models.md）。 */
+export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+export function readModel(front: Record<string, any>) {
+  const m = front.model;
+  if (m === undefined || m === null || m === '') return null;
+  if (typeof m !== 'string' || !(MODEL_ALIASES.includes(m as any) || /^claude-[a-z0-9-]+$/.test(m))) fail(`票头 model 写法不认识：${m}（写 ${MODEL_ALIASES.join('、')}，或完整的模型 id，例：claude-opus-5-5）`);
+  return m;
 }
 
 /** 票头 publish 里能写的发布类动作。 */
@@ -209,6 +219,7 @@ export function dispatch(lineDir: string, id: string, opts: { owner?: string; se
   const ticket = readTicket(file);
   if (!ticket.hasCriteria && !ticket.gates.length) fail(`票 ${id} 没有「**达标」段也没有 gate 块：先把判法写进票再派`);
   readPublish(ticket.front);
+  readModel(ticket.front);
   const lineRepo = repoRoot(lineDir);
   const already = loadLedger(lineDir).tickets[id];
   if (!reopenable(already)) fail(`票 ${id} 已经${STATUS_TEXT[already!.status]}，不能重派；要改判法先和用户定，再 csa ticket set ${id} abandoned 后另开一张`);
@@ -320,6 +331,7 @@ export function show(lineDir: string, id: string, queueItems: { id: string; tick
   else if (entry.status === 'started' && unacked) next = `取作业 ${unacked.id} 的结果（csa queue log），取完 csa queue ack ${unacked.id}`;
   return {
     ticket: id, status: entry.status, status_text: STATUS_TEXT[entry.status], owner: entry.owner ?? null, session: entry.session ?? null,
+    model: typeof front.model === 'string' && front.model ? front.model : null,
     file, contract_sha: entry.contract_sha, updated_at: entry.updated_at, jobs, gate, heads, run_log: runLog, next: next.replace(/<票>/g, id),
   };
 }
@@ -329,6 +341,7 @@ export function showText(card: ReturnType<typeof show>) {
   return [
     `票 ${card.ticket}：${card.status_text}，${card.owner ?? '?'}${card.session ? `（${card.session}）` : ''}，更新 ${new Date(card.updated_at).toLocaleString('sv-SE')}`,
     `票文件：${card.file}`,
+    `模型：${card.model ?? '票头没写，用总调度的默认（docs/models.md）'}`,
     `作业：${card.jobs.length ? card.jobs.map(j => `${j.id} ${j.state}${j.rc !== null ? ` rc ${j.rc}` : ''}${j.acked ? '' : j.state === 'running' || j.state === 'queued' ? '' : ' 未取'}`).join('；') : '无'}`,
     `gate：${card.gate ? `${card.gate.verdict}，${card.gate.md}` : '还没跑'}`,
     `提交：${Object.entries(card.heads).map(([k, h]) => `${k} ${short(h.dispatched)} → ${short(h.now)}`).join('；') || '票头没有 scope'}`,

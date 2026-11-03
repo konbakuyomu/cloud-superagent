@@ -235,3 +235,50 @@ P1 里另外三条是规矩和文档，没有程序判法：
   - 急停是 `state.paused`，`isPaused()` 在 `pickNext` 和排队程序里都看；
   - `publish` 的校验在 `src/ticket.ts` 的 `readPublish`，dispatch 和 gate 都调它。
 - 测试编号用到 Q27、T16、P7、G8、C5。下一个新场景从 Q28、T17 起。
+
+## 8. 第三期：组合用模型（草案，本地分支 phase3-models）
+
+### 8.1 起因和定下的边界
+
+- 用户 2026-11-03 转来一篇帖子，问「组合用模型比只用 Opus 更经济」能不能用到这里。要求：**不能影响实际执行效果**。做完交给用户电脑上的 Codex 做完整审查。
+- 那篇帖子是一份 Claude 用法清单（西班牙文），并没有比较模型组合。和这里有关的只有 #3（按需开长思考）和 #17（提示缓存），细节见 [组合用模型](models.md) 开头。
+- 定的边界：
+  - 总调度、做实现的子会话不换模型；
+  - 只有看门狗和只读子代理可以用便宜模型，各有更强的一方兜底；
+  - 看门狗换之前跑影子试验；
+  - 不做级联。
+- 依据和估算见 models.md 第 1–3 节。价目来自 Claude API 技能的模型表（2026-10-06 缓存）。
+
+### 8.2 改了什么
+
+- 代码：
+  - 票头 `model`、`effort` 不算进判法（和 `owner` 一样）；
+  - `model` 写错了不让派；
+  - `csa ticket show` 显示 `model`。
+  
+  `src/ticket.ts` 的 `readTicket`、`readModel`、`show`、`showText`。
+- **判法哈希的范围变了**：去掉了 `model`、`effort` 两个字段。没写这两个字段的票，哈希和以前一样，已经派出的票不受影响。第三期之前就在票头写了 `model` 或 `effort` 的票（以前的模板里没有这两个字段，应该没有这种票），升级以后哈希会变、报 `contract-changed`；遇到了，开工前就 `csa ticket amend`，开工后照规矩作废重开。
+- 文档：
+  - 新写 `docs/models.md`；
+  - router.md：这条线参数里加了模型；`create_session` 照票头填 `model`；纯机械票的条件；
+  - watchdog.md：表里没有的情况只报不判；换新的阈值按模型；
+  - worker.md 第 9 条：只读子代理的模型；
+  - 票模板加了 `model`；
+  - cli.md、AGENTS.md、README、design.md 第 6 节跟着改。
+
+### 8.3 判法结果
+
+容器里（Linux，Node 22）：`npm run typecheck` 通过，`npm test` **66/66** 通过。
+
+| 判法 | 结果 |
+|---|---|
+| T17 只改票头的 model、effort，判法哈希不变，gate 不报 contract-changed | 过 |
+| T18 票头 model 写法不认识，不让派 | 过 |
+| T19 show 给出票头的 model；没写的给 null | 过 |
+| T8（第二期）文本卡片多了一行「模型」，行数从 7 改成 8，判法「每项一行，下一跳在最后一行」不变 | 过 |
+
+影子试验（models.md 第 5 节）还没跑：要开新会话，等这一期审查过了，由总调度单开一张票做。
+
+### 8.4 交给 Codex 审查
+
+- 审查说明和完整的上下文包，经用户电脑上的 winhand 交给 Codex，只读审查，不改文件。结论记在 8.5。
