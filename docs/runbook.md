@@ -77,3 +77,77 @@ csa queue curfew --no-start-after 06:45 --kill-at 06:50 --note "<用户原话>"
 ## 发布类动作出了岔子
 
 例如推错了仓库、评论发到了公开的地方。先停手，告诉总调度，由总调度告诉用户。**不要自己删仓库、删分支、改历史去补救**：这些也是发布类动作，同样要用户本人在执行动作的那个会话里点头。
+
+## 从原来的 `board` 命令切到 `csa`
+
+给已经在用原来那个任务仓库里 `board queue / ticket / gate / patrol` 的线（下称「原仓库」）。`csa` 就是从那里抽出来的，数据格式兼容。所以**不用搬数据**：让 `csa` 指向原来的数据目录，切的只是命令。
+
+### 先决条件（缺一条就不切）
+
+- **用户定好用哪个分支**：`main` 或 `phase3-models`。急停、`--line`、`ticket show` 只在 `phase3-models` 上有；合不合进 `main`，要用户本人在执行合并的会话里说。
+- **执行机上的队列排空**：`board patrol` 显示排队程序没在跑、正在跑的是「无」、排着 0 项。不在作业中途切。
+- **核一下执行机上原仓库的调度代码**：`csa` 是按某一版原仓库的 `scripts/dispatch/` 抽出来的。执行机上的原仓库要是之后又改过 `queue.json` 或 `ledger.json` 的字段，先对一遍差别再切。
+
+### 起 `csa`：不装到全局
+
+推荐**不全局安装**，每次用完整路径跑：
+
+1. 在执行机上找一个仓库以外的目录（例如守护进程的 scratch 目录），克隆这个仓库，检出用户定的分支。然后跑：
+
+   ```
+   npm ci
+   npm test
+   ```
+
+   `npm test` 约 2.5 分钟，只在系统临时目录里建、删它自己的文件。
+2. 之后每条命令都写成 `node <克隆目录>\bin\csa.mjs <命令> …`。数据目录每次用 `--data-dir <原来的目录>` 传，或者在同一条命令前面临时设 `CSA_DATA_DIR`。
+
+`npm install -g .`、把 `csa` 放进 PATH、设一个永久的环境变量，都算**改执行机上仓库以外的设置**，要用户点头才做。不做这几样，就什么都不用卸。
+
+### 数据目录：指向原来的那个
+
+- `--data-dir` 填原仓库原来的数据目录，也就是它的 `BOARD_DISPATCH_DIR`，没设就是它代码里的默认值。这样会接着用原来的：
+  - `queue.json`：排队记录；
+  - `logs/`：作业输出；
+  - `runner.json`：排队程序的心跳；
+  - `config.json`：登记的线、排队页另写的路径、默认 shell；
+  - `queue.md`：排队页。
+- **台账 `ledger.json` 和 gate 结果不在数据目录**，在线的目录和线所在的仓库里，原地不动。`csa ticket list --line <线>` 应该和 `board ticket list --line <线>` 列出一样的票。
+- **判法哈希不变**：票头没写 `model`、`effort` 的票，`csa` 算出来的哈希和 `board` 一样，所以已经派出的票不会报 `contract-changed`。
+- 第一次起 `csa queue run` 时，已经结束、还没写过事件的老作业，会各往 `events.jsonl` 补一行（不起钩子，钩子还没配）。要是想先配钩子，先跑 `csa queue config --on-end …`：这一步会把老作业记成「开钩子以前就结束了」，什么都不补。
+
+### 切的步骤
+
+1. **核对**。用 `csa` 读一遍，应该和 `board` 看到的一样：
+
+   ```
+   csa queue status --data-dir <原来的目录>
+   csa patrol --data-dir <原来的目录>
+   csa ticket list --line <线> --data-dir <原来的目录>
+   ```
+
+2. **试通**。排一个一秒就完的空作业，写上 `--line`：
+
+   ```
+   csa queue add --owner TEST --est 5s --line <线> --data-dir <原来的目录> -- <命令>
+   ```
+
+   用守护进程的后台作业开 `node <克隆目录>\bin\csa.mjs queue run --idle-exit 5 --data-dir <原来的目录>`（winhand：`job_start`）。再跑 `csa queue log <作业 id>` 看输出，最后 `csa queue ack <作业 id>`。
+3. **改会话的命令**：
+   - 告诉每个子会话和看门狗，从现在起 `board queue / ticket / gate / patrol` 一律换成 `node <克隆目录>\bin\csa.mjs …`，加 `--data-dir`；
+   - 排作业带 `--line`；
+   - 急停用 `csa queue pause`。
+
+   看门狗的开场说明换成 v2.1 的 [watchdog.md](roles/watchdog.md)。
+4. **从这时起，执行机上只用 `csa` 起排队程序，不再用 `board queue run`**。两边认同一个 `runner.json`，所以同一时间只会有一个排队程序在跑。但别让两个工具同时写排队和台账：Windows 上两边规范路径的写法不完全一样，台账锁的名字可能对不上。
+
+### 回退：切回 `board`
+
+1. `csa queue pause`，等在跑的停下（或者等它跑完）。然后用守护进程停掉 `csa` 的排队程序（winhand：`job_stop`）。
+2. **处理 `board` 不认识的东西**：
+   - 排着、带 `--if` 的作业：`board` 会**不检查就直接跑**。先 `csa queue cancel` 掉，回退以后用 `board queue add` 重排；
+   - 急停：`board` 不认识，会照常开作业。确认 `csa queue status` 里 `paused` 是 null 以后再回退；不是，就先 `csa queue resume`，同时手上不留排着的作业；
+   - 记成 `skipped` 的老作业：`board` 的排队页里显示不出状态名，不影响排队，可以不管；
+   - `events.jsonl`、`config.json` 里的 `on_end`：`board` 不用，留着不碍事。
+3. 用 `board queue run` 起排队程序，照旧告诉各会话换回 `board` 的命令。
+4. `csa` 的克隆目录留着就行：它不在 PATH 里，也没改任何设置，不用卸。
